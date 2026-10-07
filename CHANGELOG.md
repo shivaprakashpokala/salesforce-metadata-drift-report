@@ -12,7 +12,8 @@ All notable changes to this project are documented here. The format follows
 
 - Compare a baseline org (the source of truth) with a target org, usually a sandbox,
   using `baseline-auth-url` and `target-auth-url`. Metadata is retrieved with the `sf` CLI
-  and the action logs out of both orgs at the end of every run.
+  and the action logs out of both orgs as soon as retrieval finishes, before comparing.
+  The retrieved metadata is deleted at the end of the run.
 - Drift report in Markdown, JSON and HTML. The report starts with the verdict, lists
   added and missing components as tables, shows Apex changes as a line diff and links
   to the workflow run.
