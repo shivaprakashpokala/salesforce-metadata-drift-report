@@ -11,6 +11,31 @@ It retrieves the same metadata from both orgs, usually production and a sandbox,
 - The Salesforce CLI (`sf`) on the runner. The workflow below installs it.
 - Two repository secrets, each holding the auth URL of one org.
 
+## What gets compared
+
+The action compares **Salesforce metadata components** — the units the Metadata API and source-format projects use — not arbitrary folders, org **data**, or Setup screens. Examples: custom objects (and their fields, validation rules, and record types), profiles, permission sets, Apex classes and triggers, flows, layouts, Lightning pages, apps, and remote site settings.
+
+**Default scope** (when you do not set `package-xml-path`):
+
+- **`metadata-types`:** `CustomObject`, `Layout`, `Flow`, `Profile`, `PermissionSet`, `FlexiPage`, `ApexClass`, `ApexTrigger`, `CustomApplication`, `RemoteSiteSetting`
+- **`CustomObject`:** all custom objects in each org (`*`); standard objects are **not** included unless you list them below
+- **`standard-objects`:** `Account`, `Contact`, `Lead`, `Opportunity`, `Case` (only used when `CustomObject` is in `metadata-types`)
+
+**Change the scope:**
+
+| Input | Effect |
+|---|---|
+| `metadata-types` | Comma-separated types to retrieve and compare. Other supported types include `ApexPage`, `CustomTab`, `LightningComponentBundle`, `NamedCredential`, `StaticResource`, and more; unsupported types require a manifest. |
+| `standard-objects` | Standard object API names to include with `CustomObject` |
+| `package-xml-path` | Path to your `package.xml`. When set, it **replaces** `metadata-types` and `standard-objects` |
+
+**Excluded or out of scope:**
+
+- **Managed packages:** wildcard retrieve (the default inputs) does **not** pull metadata installed from managed packages, so those components are not compared. List them explicitly in `package.xml` if you need them.
+- **Not in the manifest or defaults:** users, Chatter, reports, and any metadata type you did not retrieve are not compared.
+- **Profiles and permission sets:** object, field, Apex class, page, tab, app, and record-type entries are compared only when that target is also in scope. After org retrieve, the action applies the same filter so both sides match.
+- **Unrecognized files:** if the retrieve contains files that are not Salesforce metadata (or paths ignored by `.forceignore` are left over), the report warns and the outcome is **`incomplete`**. Retrieve warnings (for example a listed standard object missing in one org) also mark the run incomplete even though the report is published.
+
 ## Workflow
 
 Save this as `.github/workflows/metadata-drift.yml`:
@@ -90,8 +115,6 @@ The status is `incomplete` when Salesforce could not return some of the requeste
 | `artifact-name` | `salesforce-metadata-drift-report` | Must be unique within a workflow run. |
 | `artifact-retention-days` | `14` | Days to keep the artifact. |
 | `upload-artifact`, `job-summary` | `true` | Turn the artifact or Job Summary off. |
-
-Components installed from managed packages are not compared.
 
 ## License
 
