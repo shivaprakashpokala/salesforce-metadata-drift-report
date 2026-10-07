@@ -1,0 +1,8 @@
+node_modules
+*.log
+.DS_Store
+.sf-drift-work/
+drift-report/
+coverage/
+*.tsbuildinfo
+/licenses.txt

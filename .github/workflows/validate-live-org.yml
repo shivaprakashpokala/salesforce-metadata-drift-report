@@ -1,0 +1,127 @@
+name: Validate live Salesforce orgs
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish-reports:
+        description: Upload the comparison reports as artifacts (kept for 7 days).
+        type: boolean
+        default: true
+  workflow_call:
+    secrets:
+      SF_BASELINE_AUTH_URL:
+        required: false
+      SF_TARGET_AUTH_URL:
+        required: false
+    inputs:
+      commit:
+        description: Commit to validate.
+        required: true
+        type: string
+      publish-reports:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Secrets come from the salesforce-validation environment or are forwarded by the caller.
+    environment: salesforce-validation
+    steps:
+      - name: Check validation secrets
+        id: secrets
+        env:
+          BASELINE_AUTH_URL: ${{ secrets.SF_BASELINE_AUTH_URL }}
+          TARGET_AUTH_URL: ${{ secrets.SF_TARGET_AUTH_URL }}
+        run: |
+          if [ -z "$BASELINE_AUTH_URL" ] || [ -z "$TARGET_AUTH_URL" ]; then
+            echo "::notice::Live org validation skipped: SF_BASELINE_AUTH_URL and SF_TARGET_AUTH_URL are not set."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          elif [ "$BASELINE_AUTH_URL" = "$TARGET_AUTH_URL" ]; then
+            echo "::warning::Live org validation skipped: SF_BASELINE_AUTH_URL and SF_TARGET_AUTH_URL are identical. Use two different orgs or users."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.secrets.outputs.available == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        if: steps.secrets.outputs.available == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install Salesforce CLI
+        if: steps.secrets.outputs.available == 'true'
+        run: |
+          npm install --global @salesforce/cli@2.151.7
+          sf --version
+
+      - name: Compare with default inputs
+        id: defaults
+        if: steps.secrets.outputs.available == 'true'
+        uses: ./
+        with:
+          baseline-auth-url: ${{ secrets.SF_BASELINE_AUTH_URL }}
+          target-auth-url: ${{ secrets.SF_TARGET_AUTH_URL }}
+          upload-artifact: ${{ inputs.publish-reports }}
+          artifact-name: live-defaults-report-${{ github.run_id }}-${{ github.run_attempt }}
+          artifact-retention-days: 7
+          output-dir: ${{ runner.temp }}/sf-drift-live/defaults
+          working-dir: ${{ runner.temp }}/sf-drift-live/work
+
+      - name: Compare with a package.xml
+        id: manifest
+        if: steps.secrets.outputs.available == 'true'
+        uses: ./
+        with:
+          baseline-auth-url: ${{ secrets.SF_BASELINE_AUTH_URL }}
+          target-auth-url: ${{ secrets.SF_TARGET_AUTH_URL }}
+          package-xml-path: scripts/live-validation/package.xml
+          upload-artifact: ${{ inputs.publish-reports }}
+          artifact-name: live-manifest-report-${{ github.run_id }}-${{ github.run_attempt }}
+          artifact-retention-days: 7
+          job-summary: 'false'
+          output-dir: ${{ runner.temp }}/sf-drift-live/manifest
+          working-dir: ${{ runner.temp }}/sf-drift-live/work
+
+      - name: Check results
+        if: steps.secrets.outputs.available == 'true'
+        env:
+          DEFAULTS_REPORT: ${{ steps.defaults.outputs.report-json-path }}
+          MANIFEST_REPORT: ${{ steps.manifest.outputs.report-json-path }}
+          DEFAULTS_ARTIFACT: ${{ steps.defaults.outputs.artifact-id }}
+          PUBLISH_REPORTS: ${{ inputs.publish-reports }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          for (const name of ['DEFAULTS_REPORT', 'MANIFEST_REPORT']) {
+            const report = JSON.parse(fs.readFileSync(process.env[name], 'utf8'));
+            assert.ok(['drift', 'no-drift'].includes(report.outcome), `${name}: comparison is ${report.outcome}`);
+            assert.ok(report.summary.total > 0, `${name}: no metadata was compared`);
+            assert.ok(report.baseline.orgId && report.target.orgId, `${name}: org IDs are missing`);
+            assert.equal(report.retrievals?.length, 2, `${name}: expected two retrievals`);
+            console.log(`${name}: ${report.outcome}, ${report.summary.total} components`);
+          }
+          assert.equal(Boolean(process.env.DEFAULTS_ARTIFACT), process.env.PUBLISH_REPORTS === 'true');
+          NODE
+          if sf alias list --json | grep -q 'sf-drift-'; then
+            echo "::error::The action left an org login behind."
+            exit 1
+          fi
+
+      - name: Remove local reports
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/sf-drift-live"

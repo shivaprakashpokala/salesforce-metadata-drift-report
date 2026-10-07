@@ -1,0 +1,37 @@
+{
+  "name": "salesforce-metadata-drift-report",
+  "version": "1.0.0",
+  "description": "Salesforce Metadata Drift Report — GitHub Action that detects metadata drift between a baseline org (source of truth) and a sandbox and publishes a detailed report artifact",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shivaprakashpokala/salesforce-metadata-drift-report.git"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc --noEmit && node scripts/build.mjs",
+    "test": "vitest run",
+    "test:bundle": "node scripts/smoke-test.mjs",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit",
+    "prepare": "npm run build"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@actions/artifact": "^6.2.1",
+    "@actions/core": "3.0.1",
+    "@actions/exec": "^1.1.1",
+    "@salesforce/source-deploy-retrieve": "13.4.3",
+    "fast-xml-parser": "5.11.1",
+    "glob": "^11.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.0",
+    "@vercel/ncc": "^0.38.3",
+    "typescript": "^5.7.3",
+    "vitest": "4.1.11"
+  }
+}

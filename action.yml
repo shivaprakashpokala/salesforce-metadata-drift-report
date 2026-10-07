@@ -1,0 +1,84 @@
+name: 'Salesforce Metadata Drift Report'
+description: 'Compare the metadata of a Salesforce org you trust against another org, usually a sandbox, and publish a drift report.'
+author: 'shivaprakashpokala'
+branding:
+  icon: 'git-pull-request'
+  color: 'blue'
+
+inputs:
+  baseline-auth-url:
+    description: 'SFDX auth URL of the baseline org, the source of truth (usually production). Pass it from a secret.'
+    required: true
+  target-auth-url:
+    description: 'SFDX auth URL of the org to check for drift (usually a sandbox). Pass it from a secret.'
+    required: true
+  metadata-types:
+    description: 'Comma-separated metadata types to compare. Custom fields, validation rules and record types come with CustomObject.'
+    required: false
+    default: 'CustomObject,Layout,Flow,Profile,PermissionSet,FlexiPage,ApexClass,ApexTrigger,CustomApplication,RemoteSiteSetting'
+  standard-objects:
+    description: 'Comma-separated standard objects to compare with their custom fields. Used when metadata-types includes CustomObject.'
+    required: false
+    default: 'Account,Contact,Lead,Opportunity,Case'
+  package-xml-path:
+    description: 'Path to your own package.xml. Replaces metadata-types and standard-objects.'
+    required: false
+  api-version:
+    description: 'Salesforce API version, for example 64.0. Defaults to the latest version both orgs support.'
+    required: false
+  baseline-label:
+    description: 'Name for the baseline in the report. Defaults to the org name.'
+    required: false
+  target-label:
+    description: 'Name for the target in the report. Defaults to the org name.'
+    required: false
+  upload-artifact:
+    description: 'Upload the report files as a workflow artifact.'
+    required: false
+    default: 'true'
+  artifact-name:
+    description: 'Artifact name. Must be unique within the workflow run, so set it per job when comparing several sandboxes.'
+    required: false
+    default: 'salesforce-metadata-drift-report'
+  artifact-retention-days:
+    description: 'Days to keep the artifact.'
+    required: false
+    default: '14'
+  job-summary:
+    description: 'Show the report in the Job Summary.'
+    required: false
+    default: 'true'
+  output-dir:
+    description: 'Folder for the report files on the runner.'
+    required: false
+    default: 'drift-report'
+  working-dir:
+    description: 'Scratch folder for retrieved metadata. Removed after the run.'
+    required: false
+    default: '.sf-drift-work'
+
+outputs:
+  comparison-status:
+    description: 'drift, no-drift, incomplete (some metadata could not be retrieved; the step fails) or error (the step failed before comparing).'
+  has-drift:
+    description: 'true when anything was added, missing or changed in the target.'
+  added-count:
+    description: 'Components in the target but not in the baseline.'
+  removed-count:
+    description: 'Components in the baseline but missing from the target.'
+  changed-count:
+    description: 'Components in both orgs with different content.'
+  unchanged-count:
+    description: 'Components that match.'
+  report-md-path:
+    description: 'Path to metadata-drift-report.md.'
+  report-json-path:
+    description: 'Path to metadata-drift-report.json.'
+  report-html-path:
+    description: 'Path to metadata-drift-report.html.'
+  artifact-id:
+    description: 'ID of the uploaded artifact, empty when upload-artifact is false.'
+
+runs:
+  using: 'node24'
+  main: 'dist/index.js'

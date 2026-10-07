@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (typecheck)
+        run: npm run lint
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Build action bundle
+        run: npm run build
+
+      - name: Smoke test standalone bundle
+        run: npm run test:bundle
+
+      # Workflows that use the action run the committed dist/, so it must match src/.
+      - name: Verify committed dist/ matches source
+        run: |
+          if [ -n "$(git status --porcelain --untracked-files=all -- dist/)" ]; then
+            echo "::error::dist/ is out of date. Run 'npm run build' and commit the result."
+            git --no-pager diff --stat -- dist/
+            exit 1
+          fi
+
+  # Runs the action on the committed fixtures instead of two orgs and checks the artifact it uploads.
+  fixture-drift-report:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run drift report on fixtures
+        id: drift
+        uses: ./
+        env:
+          DRIFT_TEST_BASELINE_PATH: __tests__/fixtures/org-a
+          DRIFT_TEST_TARGET_PATH: __tests__/fixtures/org-b
+        with:
+          baseline-auth-url: force://fixture-baseline
+          target-auth-url: force://fixture-target
+          baseline-label: Fixture baseline (org-a)
+          target-label: Fixture target (org-b)
+          artifact-name: drift-report-fixtures
+          artifact-retention-days: 7
+
+      - name: Verify outputs
+        run: |
+          test -f drift-report/metadata-drift-report.md
+          test -f drift-report/metadata-drift-report.json
+          test -f drift-report/metadata-drift-report.html
+          test "${{ steps.drift.outputs.has-drift }}" = "true"
+          test "${{ steps.drift.outputs.comparison-status }}" = "drift"
+          test "${{ steps.drift.outputs.added-count }}" = "2"
+          test "${{ steps.drift.outputs.removed-count }}" = "1"
+          test "${{ steps.drift.outputs.changed-count }}" = "3"
+          test "${{ steps.drift.outputs.unchanged-count }}" = "2"
+          test -n "${{ steps.drift.outputs.artifact-id }}"
+          echo "artifact-id=${{ steps.drift.outputs.artifact-id }}"
+
+      - name: Download the artifact the action published
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: drift-report-fixtures
+          path: downloaded
+
+      - name: Verify artifact contents
+        run: |
+          test -f downloaded/metadata-drift-report.md
+          test -f downloaded/metadata-drift-report.json
+          test -f downloaded/metadata-drift-report.html
+          diff -q downloaded/metadata-drift-report.md drift-report/metadata-drift-report.md

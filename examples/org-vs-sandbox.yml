@@ -1,0 +1,32 @@
+# Compare a sandbox with production. Copy this file to .github/workflows/
+# and add the SFDX_PROD_AUTH_URL and SFDX_QA_AUTH_URL repository secrets.
+name: Metadata drift
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  drift-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Salesforce CLI
+        run: npm install --global @salesforce/cli
+
+      - name: Compare production with QA
+        id: drift
+        uses: shivaprakashpokala/salesforce-metadata-drift-report@v1
+        with:
+          baseline-auth-url: ${{ secrets.SFDX_PROD_AUTH_URL }}
+          target-auth-url: ${{ secrets.SFDX_QA_AUTH_URL }}
+          baseline-label: Production
+          target-label: QA sandbox
+
+      # Drift alone never fails the job. Change this to exit 1 if it should.
+      - name: Flag drift
+        if: steps.drift.outputs.has-drift == 'true'
+        run: echo "::warning::QA has drifted from production (${{ steps.drift.outputs.changed-count }} changed)"

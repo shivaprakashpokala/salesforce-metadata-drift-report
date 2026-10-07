@@ -1,0 +1,36 @@
+# Compare several sandboxes with production, one job per sandbox. Copy this
+# file to .github/workflows/ and add one auth URL secret per org.
+name: Metadata drift (all sandboxes)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sandbox: dev
+            secret: SFDX_DEV_AUTH_URL
+          - sandbox: qa
+            secret: SFDX_QA_AUTH_URL
+          - sandbox: uat
+            secret: SFDX_UAT_AUTH_URL
+    name: drift-${{ matrix.sandbox }}
+    steps:
+      - name: Install Salesforce CLI
+        run: npm install --global @salesforce/cli
+
+      - name: Compare production with ${{ matrix.sandbox }}
+        uses: shivaprakashpokala/salesforce-metadata-drift-report@v1
+        with:
+          baseline-auth-url: ${{ secrets.SFDX_PROD_AUTH_URL }}
+          target-auth-url: ${{ secrets[matrix.secret] }}
+          baseline-label: Production
+          target-label: ${{ matrix.sandbox }}
+          artifact-name: drift-report-${{ matrix.sandbox }}

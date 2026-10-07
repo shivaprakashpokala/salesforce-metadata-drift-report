@@ -1,0 +1,133 @@
+# Live org validation runs when its secrets are available and is skipped otherwise.
+name: Release
+
+on:
+  # Manual runs validate without creating a release.
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.candidate.outputs.commit }}
+    steps:
+      - name: Checkout release candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify candidate and main ancestry
+        id: candidate
+        shell: bash
+        env:
+          RELEASE_EVENT: ${{ github.event_name }}
+        run: |
+          commit=$(git rev-parse HEAD)
+          if [ "$RELEASE_EVENT" = push ]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "::error::Release tags must be stable versions such as v1.0.0."
+              exit 1
+            fi
+            if [ "$(git rev-parse "$GITHUB_REF_NAME^{commit}")" != "$commit" ]; then
+              echo "::error::The release tag changed after this run started."
+              exit 1
+            fi
+          fi
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "::error::The tagged commit must already be merged into main."
+            exit 1
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint and test
+        run: |
+          npm run lint
+          npm test
+
+      - name: Verify committed dist/ matches source
+        run: |
+          npm run build
+          if [ -n "$(git status --porcelain --untracked-files=all -- dist/)" ]; then
+            echo "::error::dist/ is out of date. Run 'npm run build' and commit the result before tagging."
+            git --no-pager diff --stat -- dist/
+            exit 1
+          fi
+
+      - name: Smoke test standalone bundle
+        run: npm run test:bundle
+
+  live-org:
+    needs: validate
+    uses: ./.github/workflows/validate-live-org.yml
+    with:
+      commit: ${{ needs.validate.outputs.commit }}
+    secrets:
+      SF_BASELINE_AUTH_URL: ${{ secrets.SF_BASELINE_AUTH_URL }}
+      SF_TARGET_AUTH_URL: ${{ secrets.SF_TARGET_AUTH_URL }}
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [validate, live-org]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout validated release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Verify tag still points to validated main commit
+        env:
+          VALIDATED_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          if [ "$(git rev-parse "$GITHUB_REF_NAME^{commit}")" != "$VALIDATED_COMMIT" ]; then
+            echo "::error::The release tag no longer points to the validated commit."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$VALIDATED_COMMIT" origin/main; then
+            echo "::error::The validated release commit is no longer in main."
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              --verify-tag
+          fi
+
+      - name: Move major version tag
+        run: node scripts/update-major-tag.mjs "$GITHUB_REF_NAME"
