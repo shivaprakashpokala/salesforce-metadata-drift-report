@@ -36,6 +36,28 @@ The action compares **Salesforce metadata components** — the units the Metadat
 - **Profiles and permission sets:** object, field, Apex class, page, tab, app, and record-type entries are compared only when that target is also in scope. After org retrieve, the action applies the same filter so both sides match.
 - **Unrecognized files:** if the retrieve contains files that are not Salesforce metadata (or paths ignored by `.forceignore` are left over), the report warns and the outcome is **`incomplete`**. Retrieve warnings (for example a listed standard object missing in one org) also mark the run incomplete even though the report is published.
 
+## How drift is found
+
+The action logs in to both orgs, retrieves the same metadata scope from each, compares the results, and publishes a drift report.
+
+```mermaid
+flowchart TD
+    A["Auth URLs"] --> B["Retrieve baseline and target"]
+    B --> C["Normalize metadata"]
+    C --> D["Compare components"]
+    D --> E["Classify added, missing, changed"]
+    E --> F["drift / no-drift / incomplete"]
+    F --> G["Job Summary and artifact"]
+```
+
+- **Scope:** builds the retrieve list from `metadata-types` and `standard-objects`, or from your `package.xml` when you set `package-xml-path`. Fields, validation rules, and record types are retrieved with each `CustomObject`.
+- **Retrieve:** pulls that scope from the baseline org, then the target, using the same API version on both sides.
+- **Normalize:** rewrites XML and related files so harmless differences (element order, whitespace, sorted profile entries) do not count as drift.
+- **Compare:** matches components by type and name and classifies each as added in the target, missing from the target, changed, or unchanged.
+- **Outcome:** **`drift`** when anything was added, missing, or changed; **`no-drift`** when everything matches; **`incomplete`** when Salesforce could not return part of the scope or some files could not be identified (the report is still published, but the step fails). Failures before compare (bad auth, failed retrieve) are **`error`** with no report.
+
+This compares **metadata components**, not org data or Setup screens.
+
 ## Workflow
 
 Save this as `.github/workflows/metadata-drift.yml`:
