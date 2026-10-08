@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-08
+
+### Documentation
+
+- README: describe what gets compared and how drift is found.
+- CONTRIBUTING: add a before publishing checklist.
+- Changelog: correct logout timing in the 1.0.0 entry.
+
 ## [1.0.0] - 2026-10-07
 
 ### Added
