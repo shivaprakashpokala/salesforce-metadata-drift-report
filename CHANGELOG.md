@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-10-09
+
+### Documentation
+
+- README: describe drift across environments, not only production versus one sandbox.
+- README: document optional inputs, including `output-dir` and `working-dir`.
+- README: link both example workflows, `examples/org-vs-sandbox.yml` and `examples/sandbox-matrix.yml`.
+
 ## [1.0.1] - 2026-10-08
 
 ### Documentation
