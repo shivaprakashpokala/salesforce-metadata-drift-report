@@ -71781,7 +71781,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.Glob = void 0;
 const minimatch_1 = __nccwpck_require__(62883);
 const node_url_1 = __nccwpck_require__(73136);
-const path_scurry_1 = __nccwpck_require__(14198);
+const path_scurry_1 = __nccwpck_require__(91817);
 const pattern_js_1 = __nccwpck_require__(2029);
 const walker_js_1 = __nccwpck_require__(83581);
 // if no process global, just call it linux.
@@ -76753,7 +76753,7 @@ exports.unescape = unescape;
 
 /***/ }),
 
-/***/ 14198:
+/***/ 91817:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
 
@@ -99250,10 +99250,174 @@ function writeJsonReport(report, outputDir) {
     return filePath;
 }
 
+;// CONCATENATED MODULE: ./src/report/describe.ts
+
+const LABELS = {
+    applicationVisibilities: 'App visibility',
+    classAccesses: 'Apex class access',
+    customMetadataTypeAccesses: 'Custom metadata type access',
+    customPermissions: 'Custom permissions',
+    customSettingAccesses: 'Custom setting access',
+    externalDataSourceAccesses: 'External data source access',
+    fieldPermissions: 'Field permissions',
+    flowAccesses: 'Flow access',
+    layoutAssignments: 'Layout assignments',
+    loginIpRanges: 'Login IP ranges',
+    objectPermissions: 'Object permissions',
+    pageAccesses: 'Visualforce page access',
+    recordTypeVisibilities: 'Record type visibility',
+    tabSettings: 'Tab settings',
+    tabVisibilities: 'Tab visibility',
+    userPermissions: 'User permissions',
+};
+/** "allowCreate" → "Allow create". API names with underscores are kept as they are. */
+function humanize(name) {
+    if (LABELS[name])
+        return LABELS[name];
+    if (name.includes('_') || !/^[a-z][A-Za-z0-9]*$/.test(name))
+        return name;
+    const words = name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').toLowerCase();
+    return words.charAt(0).toUpperCase() + words.slice(1);
+}
+function tokenize(path) {
+    const tokens = [];
+    for (const match of path.matchAll(/\[([^\]]*)\]|([^.[\]]+)/g)) {
+        tokens.push(match[1] !== undefined ? { key: match[1] } : { name: match[2] });
+    }
+    return tokens;
+}
+const tokenLabel = (token) => ('name' in token ? humanize(token.name) : /^\d+$/.test(token.key) ? `#${Number(token.key) + 1}` : token.key);
+/** Group field-level changes by the setting they belong to, with readable labels. */
+function describeFieldChanges(metadataType, changes) {
+    const groups = new Map();
+    for (const change of changes) {
+        // Components with several files prefix each path with the file name.
+        const fileMatch = /^(.+?): (.+)$/.exec(change.path);
+        const file = fileMatch && !fileMatch[1].includes('[') ? fileMatch[1] : undefined;
+        const tokens = tokenize(file ? fileMatch[2] : change.path);
+        if (tokens.length > 1 && 'name' in tokens[0] && tokens[0].name === metadataType)
+            tokens.shift();
+        const leaf = tokens.pop();
+        const parents = tokens.map(tokenLabel);
+        const title = [file, ...parents].filter(Boolean).join(' › ');
+        const lastKey = tokens.length && 'key' in tokens[tokens.length - 1] ? tokens[tokens.length - 1].key : undefined;
+        const group = groups.get(title) ?? { title, kind: 'changed', rows: [], key: lastKey };
+        group.rows.push({ label: leaf ? tokenLabel(leaf) : 'Value', baseline: change.baselineValue, target: change.targetValue });
+        groups.set(title, group);
+    }
+    return [...groups.values()].map(({ key, ...group }) => {
+        const kind = group.rows.every((row) => row.baseline === undefined)
+            ? 'added'
+            : group.rows.every((row) => row.target === undefined) ? 'removed' : 'changed';
+        // An added or removed entry repeats its own name as a field; leave that out.
+        const rows = kind === 'changed' ? group.rows : group.rows.filter((row) => (row.baseline ?? row.target) !== key);
+        return { ...group, kind, rows };
+    });
+}
+const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+const MAX_INLINE_VALUE = 40;
+function isLineChange(change) {
+    return LINE_CHANGE_PATH.test(change.path);
+}
+/** Short line such as "Object permissions: 1 added · Apex class access: 1 removed". */
+function summarizeComponent(component) {
+    const changes = component.fieldChanges ?? [];
+    const lines = changes.filter(isLineChange);
+    const parts = [];
+    if (lines.length) {
+        const added = lines.filter((change) => change.path.includes('target line')).length;
+        parts.push(`${plural(added, 'line')} added, ${lines.length - added} removed`);
+    }
+    const groups = describeFieldChanges(component.metadataType, changes.filter((change) => !isLineChange(change)));
+    // One or two plain value changes read best spelled out: "Length 50 → 80".
+    const rows = groups.flatMap((group) => group.rows.map((row) => ({ group, row })));
+    const short = (text) => text !== undefined && text.length <= MAX_INLINE_VALUE && !text.includes('\n');
+    if (rows.length && rows.length <= 2 && groups.every((group) => group.kind === 'changed')
+        && rows.every(({ row }) => short(row.baseline) && short(row.target))) {
+        parts.push(...rows.map(({ group, row }) => `${[group.title, row.label].filter(Boolean).join(' › ')}: ${row.baseline || 'empty'} → ${row.target || 'empty'}`));
+        return parts.join(' · ');
+    }
+    const counts = new Map();
+    for (const group of groups) {
+        const area = group.title.split(' › ')[0] || 'Settings';
+        const entry = counts.get(area) ?? { added: 0, removed: 0, changed: 0 };
+        entry[group.kind] += group.title ? 1 : Math.max(group.rows.length, 1);
+        counts.set(area, entry);
+    }
+    for (const [area, count] of counts) {
+        const detail = ['added', 'removed', 'changed'].filter((kind) => count[kind]).map((kind) => `${count[kind]} ${kind}`);
+        parts.push(`${area}: ${detail.join(', ')}`);
+    }
+    return parts.join(' · ') || component.summary || 'Content differs';
+}
+function verdict(report) {
+    const { summary } = report;
+    if (report.outcome === 'incomplete') {
+        return {
+            status: 'incomplete',
+            title: 'Comparison incomplete',
+            detail: 'Some metadata could not be retrieved or identified, so a clean result cannot be confirmed. ' +
+                'Check the warnings. Differences that were found are listed below.',
+        };
+    }
+    if (summary.hasDrift) {
+        const different = summary.added + summary.removed + summary.changed;
+        return {
+            status: 'drift',
+            title: 'Drift found',
+            detail: `${different} of ${summary.total} components differ between ${report.baseline.label} and ${report.target.label}.`,
+        };
+    }
+    return {
+        status: 'no-drift',
+        title: 'No drift',
+        detail: `All ${summary.unchanged} compared components in ${report.target.label} match ${report.baseline.label}.`,
+    };
+}
+const CATEGORY_LABELS = {
+    added: 'Only in target',
+    removed: 'Missing from target',
+    changed: 'Changed',
+    unchanged: 'Unchanged',
+};
+/** Components that differ, grouped by metadata type in name order. */
+function differencesByType(report) {
+    const order = { removed: 0, added: 1, changed: 2, unchanged: 3 };
+    const byType = new Map();
+    for (const component of report.components) {
+        if (component.category === 'unchanged')
+            continue;
+        byType.set(component.metadataType, [...(byType.get(component.metadataType) ?? []), component]);
+    }
+    return [...byType]
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([type, items]) => [type, items.sort((a, b) => order[a.category] - order[b.category]
+            || (a.fullName < b.fullName ? -1 : a.fullName > b.fullName ? 1 : 0))]);
+}
+/** Salesforce URL-encodes some names, such as "Force%2Ecom - Free User". Show them decoded. */
+function displayName(fullName) {
+    try {
+        return /%[0-9A-Fa-f]{2}/.test(fullName) ? decodeURIComponent(fullName) : fullName;
+    }
+    catch {
+        return fullName;
+    }
+}
+/** "2026-10-30T02:48:12.637Z" → "2026-10-30 02:48 UTC". */
+function formatTimestamp(iso) {
+    const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(iso);
+    return match ? `${match[1]} ${match[2]} UTC` : iso;
+}
+
 ;// CONCATENATED MODULE: ./src/report/html.ts
 
 
+
+
 const REPORT_HTML_FILENAME = 'metadata-drift-report.html';
+const MAX_ROWS = 50;
+const MAX_DIFF_LINES = 300;
+const MAX_VALUE_LENGTH = 2000;
 function escapeHtml(text) {
     return text
         .replace(/&/g, '&amp;')
@@ -99261,111 +99425,90 @@ function escapeHtml(text) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
 }
-function renderFieldChanges(changes) {
-    if (!changes.length)
-        return '';
-    const rows = changes
-        .slice(0, 50)
-        .map((c) => `
-        <tr>
-          <td><code>${escapeHtml(c.path)}</code></td>
-          <td class="baseline">${escapeHtml(preview(c.baselineValue ?? '—'))}</td>
-          <td class="target">${escapeHtml(preview(c.targetValue ?? '—'))}</td>
-        </tr>`)
-        .join('');
-    const more = changes.length > 50
-        ? `<p class="muted">${changes.length - 50} more differences are in the JSON report.</p>`
-        : '';
-    return `
-    <details>
-      <summary>${changes.length} field-level change(s)</summary>
-      <table class="field-changes">
-        <thead><tr><th>Path</th><th>Baseline</th><th>Target</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-      ${more}
-    </details>`;
+function value(text) {
+    if (text === undefined)
+        return '<span class="none">—</span>';
+    if (text === '')
+        return '<span class="none">empty</span>';
+    const shortened = text.length > MAX_VALUE_LENGTH ? `${text.slice(0, MAX_VALUE_LENGTH)}… (full value in the JSON report)` : text;
+    return `<code>${escapeHtml(shortened)}</code>`;
 }
-function preview(value) {
-    return value.length > 2000 ? `${value.slice(0, 2000)}... (full value in the JSON report)` : value;
-}
-function renderComponent(c) {
-    const badgeClass = c.category;
-    const fieldSection = c.category === 'changed' && c.fieldChanges?.length
-        ? renderFieldChanges(c.fieldChanges)
-        : '';
-    return `
-    <article class="component ${badgeClass}">
-      <header>
-        <span class="badge ${badgeClass}">${c.category}</span>
-        <strong>${escapeHtml(c.metadataType)}</strong>
-        <span class="name">${escapeHtml(c.fullName)}</span>
-      </header>
-      ${c.summary ? `<p class="summary">${escapeHtml(c.summary)}</p>` : ''}
-      <div class="paths">
-        ${c.baselinePath ? `<span>Baseline: <code>${escapeHtml(c.baselinePath)}</code></span>` : ''}
-        ${c.targetPath ? `<span>Target: <code>${escapeHtml(c.targetPath)}</code></span>` : ''}
-      </div>
-      ${fieldSection}
-    </article>`;
-}
-function renderOrgSide(title, label, orgKind, details) {
-    const meta = [];
-    if (details.username)
-        meta.push(`User: <code>${escapeHtml(details.username)}</code>`);
-    if (details.orgId)
-        meta.push(`Org ID: <code>${escapeHtml(details.orgId)}</code>`);
-    if (details.instanceHost)
-        meta.push(`Host: <code>${escapeHtml(details.instanceHost)}</code>`);
-    return `
-    <div class="org-side">
-      <div class="org-side-title">${escapeHtml(title)}</div>
-      <div class="org-side-header">
-        <span class="kind-badge kind-${escapeHtml(orgKind)}">${escapeHtml(orgKind)}</span>
-        <strong>${escapeHtml(label)}</strong>
-      </div>
-      ${meta.length ? `<div class="org-side-meta">${meta.join(' · ')}</div>` : ''}
-    </div>`;
-}
-function renderWarnings(warnings) {
-    if (!warnings.length)
-        return '';
-    const items = warnings.map((w) => `<li>${escapeHtml(w)}</li>`).join('');
-    return `
-    <div class="callout" role="note">
-      <strong>Warnings</strong>
-      <ul>${items}</ul>
-    </div>`;
-}
-function groupByCategory(report) {
-    const groups = {
-        added: [],
-        removed: [],
-        changed: [],
-        unchanged: [],
-    };
-    for (const c of report.components) {
-        groups[c.category].push(c);
+function renderGroup(group) {
+    const title = group.title ? `<div class="group-title">${escapeHtml(group.title)}${group.kind !== 'changed' ? ` <span class="tag ${group.kind === 'added' ? 'added' : 'removed'}">${group.kind === 'added' ? 'only in target' : 'missing from target'}</span>` : ''}</div>` : '';
+    if (group.kind !== 'changed') {
+        const settings = group.rows
+            .map((row) => `<span class="setting">${escapeHtml(row.label)} ${value(row.target ?? row.baseline)}</span>`)
+            .join('');
+        return `<div class="group">${title}${settings ? `<div class="settings">${settings}</div>` : ''}</div>`;
     }
-    return groups;
+    const rows = group.rows.map((row) => `
+        <tr><th scope="row">${escapeHtml(row.label)}</th><td class="before">${value(row.baseline)}</td><td class="after">${value(row.target)}</td></tr>`).join('');
+    return `<div class="group">${title}<table class="values"><thead><tr><th></th><th>Baseline</th><th>Target</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+function renderLineDiff(changes) {
+    const lines = changes.slice(0, MAX_DIFF_LINES).map((change) => {
+        const match = LINE_CHANGE_PATH.exec(change.path);
+        const removed = match?.[1] === 'baseline';
+        const text = removed ? change.baselineValue : change.targetValue;
+        return `<span class="${removed ? 'del' : 'ins'}"><span class="ln">${match?.[2] ?? ''}</span>${removed ? '−' : '+'} ${escapeHtml(text ?? '')}</span>`;
+    });
+    const more = changes.length > MAX_DIFF_LINES ? `<p class="note">${changes.length - MAX_DIFF_LINES} more changed lines are in the JSON report.</p>` : '';
+    return `<pre class="diff">${lines.join('')}</pre>${more}`;
+}
+function renderComponent(component) {
+    const name = `<span class="name">${escapeHtml(displayName(component.fullName))}</span>`;
+    if (component.category !== 'changed') {
+        return `<li class="item">${name}<span class="tag ${component.category}">${CATEGORY_LABELS[component.category]}</span></li>`;
+    }
+    const changes = component.fieldChanges ?? [];
+    const lineChanges = changes.filter(isLineChange);
+    const groups = describeFieldChanges(component.metadataType, changes.filter((change) => !isLineChange(change)));
+    const shown = groups.slice(0, MAX_ROWS);
+    const more = groups.length > MAX_ROWS ? `<p class="note">${groups.length - MAX_ROWS} more differences are in the JSON report.</p>` : '';
+    return `
+      <li class="item">
+        <details>
+          <summary>${name}<span class="hint">${escapeHtml(summarizeComponent(component))}</span></summary>
+          <div class="body">
+            ${lineChanges.length ? renderLineDiff(lineChanges) : ''}
+            ${shown.map(renderGroup).join('')}
+            ${more}
+          </div>
+        </details>
+      </li>`;
+}
+function renderType([type, items]) {
+    const counts = ['removed', 'added', 'changed']
+        .map((category) => [category, items.filter((item) => item.category === category).length])
+        .filter(([, count]) => count)
+        .map(([category, count]) => `${count} ${CATEGORY_LABELS[category].toLowerCase()}`)
+        .join(' · ');
+    return `
+    <section class="type">
+      <h3>${escapeHtml(type)} <span class="type-count">${counts}</span></h3>
+      <ul class="items">${items.map(renderComponent).join('')}</ul>
+    </section>`;
+}
+function orgCell(org) {
+    const details = [
+        org.username && `<div>${escapeHtml(org.username)}</div>`,
+        org.orgId && `<div class="sub">Org ID ${escapeHtml(org.orgId)}</div>`,
+        org.instanceHost && `<div class="sub">${escapeHtml(org.instanceHost)}</div>`,
+    ].filter(Boolean).join('');
+    return `<td><div class="org-name">${escapeHtml(org.label)} <span class="kind kind-${escapeHtml(org.orgKind)}">${escapeHtml(org.orgKind)}</span></div>${details}</td>`;
 }
 function renderHtmlReport(report) {
-    const groups = groupByCategory(report);
-    const { summary, baseline, target, warnings, generatedAt } = report;
-    const verdict = report.outcome === 'incomplete'
-        ? 'Comparison incomplete. Some metadata could not be retrieved or identified, so a clean result cannot be confirmed.'
-        : summary.hasDrift
-            ? `Drift detected: ${summary.added} added in target, ${summary.removed} missing from target, ${summary.changed} changed.`
-            : `No drift detected. All ${summary.unchanged} compared components match the baseline.`;
-    const section = (title, items, id) => {
-        if (!items.length)
-            return '';
-        return `
-      <section id="${id}">
-        <h2>${title} <span class="count">(${items.length})</span></h2>
-        ${items.map(renderComponent).join('\n')}
-      </section>`;
-    };
+    const { summary, scope } = report;
+    const result = verdict(report);
+    const types = differencesByType(report);
+    const stat = (label, count, kind) => `<div class="stat ${count ? kind : 'zero'}"><div class="stat-value">${count}</div><div class="stat-label">${label}</div></div>`;
+    const runLink = report.runUrl ? ` · <a href="${escapeHtml(report.runUrl)}">Workflow run</a>` : '';
+    const scopeList = scope ? [
+        `<li>API version ${escapeHtml(scope.apiVersion)}, ${scope.kind === 'manifest' ? 'from package-xml-path' : 'from metadata-types'}</li>`,
+        ...Object.entries(scope.members).map(([type, members]) => `<li><strong>${escapeHtml(type)}</strong>: ${escapeHtml(members.join(', '))}</li>`),
+        ...scope.notes.map((note) => `<li>${escapeHtml(note)}</li>`),
+        ...(report.retrievals ?? []).map((item) => `<li>${escapeHtml(item.side)} retrieved ${escapeHtml(formatTimestamp(item.retrievedAt))}</li>`),
+    ].join('') : '';
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -99374,156 +99517,112 @@ function renderHtmlReport(report) {
   <title>Salesforce Metadata Drift Report</title>
   <style>
     :root {
-      --bg: #0f172a;
-      --surface: #1e293b;
-      --border: #334155;
-      --text: #e2e8f0;
-      --muted: #94a3b8;
-      --added: #22c55e;
-      --removed: #ef4444;
-      --changed: #f59e0b;
-      --unchanged: #64748b;
+      color-scheme: light dark;
+      --bg: #ffffff; --surface: #f6f8fa; --border: #d8dee4; --text: #1f2328; --muted: #656d76;
+      --green: #1a7f37; --green-bg: #dafbe1; --red: #cf222e; --red-bg: #ffebe9;
+      --amber: #9a6700; --amber-bg: #fff8c5; --blue: #0969da;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8d96a0;
+        --green: #3fb950; --green-bg: #12261e; --red: #f85149; --red-bg: #2d1416;
+        --amber: #d29922; --amber-bg: #2b2111; --blue: #4493f8;
+      }
     }
     * { box-sizing: border-box; }
-    body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      margin: 0;
-      padding: 2rem;
-      line-height: 1.5;
-    }
-    h1 { margin-top: 0; }
-    .meta { color: var(--muted); margin-bottom: 2rem; }
-    .summary-cards {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-      gap: 1rem;
-      margin-bottom: 2rem;
-    }
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1rem;
-      text-align: center;
-    }
-    .card .value { font-size: 2rem; font-weight: 700; }
-    .card.added .value { color: var(--added); }
-    .card.removed .value { color: var(--removed); }
-    .card.changed .value { color: var(--changed); }
-    .card.unchanged .value { color: var(--unchanged); }
-    section { margin-bottom: 2.5rem; }
-    section h2 { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
-    .count { color: var(--muted); font-weight: normal; }
-    .component {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1rem;
-      margin-bottom: 0.75rem;
-    }
-    .component header { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
-    .badge {
-      font-size: 0.75rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      padding: 0.15rem 0.5rem;
-      border-radius: 4px;
-    }
-    .badge.added { background: color-mix(in srgb, var(--added) 25%, transparent); color: var(--added); }
-    .badge.removed { background: color-mix(in srgb, var(--removed) 25%, transparent); color: var(--removed); }
-    .badge.changed { background: color-mix(in srgb, var(--changed) 25%, transparent); color: var(--changed); }
-    .badge.unchanged { background: color-mix(in srgb, var(--unchanged) 25%, transparent); color: var(--unchanged); }
-    .name { color: var(--muted); }
-    .paths { font-size: 0.85rem; color: var(--muted); display: flex; flex-direction: column; gap: 0.25rem; }
-    code { background: var(--bg); padding: 0.1rem 0.35rem; border-radius: 3px; font-size: 0.85em; }
-    details { margin-top: 0.75rem; }
-    table.field-changes {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.85rem;
-      margin-top: 0.5rem;
-    }
-    table.field-changes th, table.field-changes td {
-      border: 1px solid var(--border);
-      padding: 0.4rem 0.6rem;
-      text-align: left;
-      vertical-align: top;
-    }
-    table.field-changes .baseline { color: #fca5a5; }
-    table.field-changes .target { color: #86efac; }
-    .muted { color: var(--muted); font-size: 0.85rem; }
-    nav.toc { margin-bottom: 2rem; }
-    nav.toc a { color: #60a5fa; margin-right: 1rem; }
-    .org-header {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-    }
-    .org-side {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1rem;
-    }
-    .org-side-title { color: var(--muted); font-size: 0.85rem; margin-bottom: 0.35rem; }
-    .org-side-header { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
-    .org-side-meta { color: var(--muted); font-size: 0.85rem; margin-top: 0.5rem; }
-    .kind-badge {
-      font-size: 0.7rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-      padding: 0.15rem 0.45rem;
-      border-radius: 999px;
-      border: 1px solid var(--border);
-    }
-    .kind-scratch { color: #c084fc; border-color: #7e22ce; }
-    .kind-sandbox { color: #67e8f9; border-color: #0e7490; }
-    .kind-developer { color: #93c5fd; border-color: #1d4ed8; }
-    .kind-production { color: #86efac; border-color: #15803d; }
-    .kind-unknown { color: #fcd34d; border-color: #b45309; }
-    .callout {
-      background: color-mix(in srgb, #f59e0b 12%, var(--surface));
-      border: 1px solid #b45309;
-      border-radius: 8px;
-      padding: 1rem 1.25rem;
-      margin-bottom: 2rem;
-    }
-    .callout ul { margin: 0.5rem 0 0; padding-left: 1.25rem; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+    main { max-width: 980px; margin: 0 auto; padding: 32px 16px 64px; }
+    a { color: var(--blue); }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+    .eyebrow { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .04em; margin: 0 0 6px; }
+    .verdict { border-left: 4px solid var(--status); padding: 4px 0 4px 16px; margin-bottom: 24px; }
+    .verdict.drift { --status: var(--amber); } .verdict.no-drift { --status: var(--green); } .verdict.incomplete { --status: var(--red); }
+    .verdict h1 { margin: 0; font-size: 28px; line-height: 1.25; }
+    .verdict p { margin: 4px 0 0; }
+    .route { color: var(--muted); font-size: 14px; margin-top: 6px !important; }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+    .stat { border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
+    .stat-value { font-size: 26px; font-weight: 600; line-height: 1.2; font-variant-numeric: tabular-nums; }
+    .stat-label { color: var(--muted); font-size: 13px; }
+    .stat.added .stat-value { color: var(--green); } .stat.removed .stat-value { color: var(--red); }
+    .stat.changed .stat-value { color: var(--amber); } .stat.zero .stat-value { color: var(--muted); }
+    .warnings { background: var(--amber-bg); border: 1px solid var(--amber); border-radius: 8px; padding: 12px 16px; margin-bottom: 24px; }
+    .warnings ul { margin: 6px 0 0; padding-left: 20px; }
+    h2 { font-size: 18px; margin: 32px 0 12px; }
+    .type { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+    .type h3 { margin: 0; padding: 10px 16px; font-size: 15px; background: var(--surface); border-bottom: 1px solid var(--border); }
+    .type-count { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 6px; }
+    .items { list-style: none; margin: 0; padding: 0; }
+    .item { border-top: 1px solid var(--border); }
+    .item:first-child { border-top: 0; }
+    .item > .name, .item > .tag { display: inline-block; }
+    li.item:not(:has(details)) { padding: 9px 16px; }
+    summary { cursor: pointer; padding: 9px 16px; list-style-position: inside; }
+    summary:hover { background: var(--surface); }
+    .name { font-weight: 600; word-break: break-word; }
+    .tag { font-size: 12px; font-weight: 500; border-radius: 999px; padding: 1px 8px; margin-left: 8px; white-space: nowrap; }
+    .tag.added { color: var(--green); background: var(--green-bg); }
+    .tag.removed { color: var(--red); background: var(--red-bg); }
+    .tag.changed { color: var(--amber); background: var(--amber-bg); }
+    .hint { display: block; color: var(--muted); font-size: 13px; margin: 2px 0 0 18px; }
+    .body { padding: 4px 16px 16px; }
+    .group { margin-top: 12px; }
+    .group-title { font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+    .settings { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--muted); font-size: 13px; }
+    .settings code { color: var(--text); }
+    table.values { border-collapse: collapse; width: 100%; font-size: 13px; }
+    table.values th, table.values td { text-align: left; vertical-align: top; padding: 5px 10px; border-bottom: 1px solid var(--border); }
+    table.values thead th { color: var(--muted); font-weight: 500; }
+    table.values tbody th { font-weight: 500; width: 30%; }
+    td.before code { color: var(--red); } td.after code { color: var(--green); }
+    td code { white-space: pre-wrap; word-break: break-word; }
+    .none { color: var(--muted); }
+    pre.diff { margin: 12px 0 0; padding: 8px 0; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; line-height: 1.45; }
+    pre.diff > span { display: block; padding: 0 12px; white-space: pre; }
+    pre.diff .del { background: var(--red-bg); } pre.diff .ins { background: var(--green-bg); }
+    pre.diff .ln { display: inline-block; min-width: 3.5em; color: var(--muted); user-select: none; }
+    .note { color: var(--muted); font-size: 13px; }
+    .empty { color: var(--muted); border: 1px dashed var(--border); border-radius: 8px; padding: 16px; }
+    table.orgs { border-collapse: collapse; width: 100%; font-size: 14px; }
+    table.orgs th, table.orgs td { text-align: left; vertical-align: top; padding: 8px 12px; border: 1px solid var(--border); width: 50%; }
+    table.orgs th { background: var(--surface); font-weight: 500; color: var(--muted); }
+    .org-name { font-weight: 600; } .sub { color: var(--muted); font-size: 13px; }
+    .kind { font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; margin-left: 4px; }
+    details.scope { margin-top: 16px; color: var(--muted); font-size: 14px; }
+    details.scope summary { padding: 4px 0; }
+    details.scope ul { margin: 6px 0 0; padding-left: 20px; }
+    @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } .verdict h1 { font-size: 24px; } }
   </style>
 </head>
 <body>
-  <h1>Salesforce Metadata Drift Report</h1>
-  <p class="meta">Generated: ${escapeHtml(generatedAt)}${report.runUrl ? ` from <a href="${escapeHtml(report.runUrl)}">this workflow run</a>` : ''}<br /><strong>${escapeHtml(verdict)}</strong></p>
-
-  <div class="org-header">
-    ${renderOrgSide('Baseline (source of truth)', baseline.label, baseline.orgKind, baseline)}
-    ${renderOrgSide('Target', target.label, target.orgKind, target)}
+<main>
+  <p class="eyebrow">Salesforce metadata drift report</p>
+  <div class="verdict ${result.status}">
+    <h1>${escapeHtml(result.title)}</h1>
+    <p>${escapeHtml(result.detail)}</p>
+    <p class="route">Baseline <strong>${escapeHtml(report.baseline.label)}</strong> → target <strong>${escapeHtml(report.target.label)}</strong> · ${escapeHtml(formatTimestamp(report.generatedAt))}${runLink}</p>
   </div>
 
-  ${renderWarnings(warnings)}
-  ${report.scope ? `<section><h2>Comparison scope</h2><p>API version ${escapeHtml(report.scope.apiVersion)}, ${report.scope.kind === 'manifest' ? 'from package-xml-path' : 'from metadata-types'}.</p><ul>${Object.entries(report.scope.members).map(([type, members]) => `<li>${escapeHtml(type)}: ${escapeHtml(members.join(', '))}</li>`).join('')}${report.scope.notes.map((note) => `<li>${escapeHtml(note)}</li>`).join('')}${(report.retrievals ?? []).map((item) => `<li>${escapeHtml(item.side)} retrieved: ${escapeHtml(item.retrievedAt)}</li>`).join('')}</ul></section>` : ''}
-
-  <div class="summary-cards">
-    <div class="card added"><div class="value">${summary.added}</div><div>Added in target</div></div>
-    <div class="card removed"><div class="value">${summary.removed}</div><div>Missing from target</div></div>
-    <div class="card changed"><div class="value">${summary.changed}</div><div>Changed</div></div>
-    <div class="card unchanged"><div class="value">${summary.unchanged}</div><div>Unchanged</div></div>
+  <div class="stats">
+    ${stat('Only in target', summary.added, 'added')}
+    ${stat('Missing from target', summary.removed, 'removed')}
+    ${stat('Changed', summary.changed, 'changed')}
+    ${stat('Unchanged', summary.unchanged, 'unchanged')}
   </div>
 
-  <nav class="toc">
-    <a href="#added">Added (${summary.added})</a>
-    <a href="#removed">Missing (${summary.removed})</a>
-    <a href="#changed">Changed (${summary.changed})</a>
-  </nav>
-  <p class="muted">Unchanged components (${summary.unchanged}) are counted above. The full list is in the JSON report.</p>
+  ${report.warnings.length ? `<div class="warnings" role="note"><strong>Warnings</strong><ul>${report.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}</ul></div>` : ''}
 
-  ${section('Added in target (not in baseline)', groups.added, 'added')}
-  ${section('Missing from target (only in baseline)', groups.removed, 'removed')}
-  ${section('Changed', groups.changed, 'changed')}
+  <h2>Differences</h2>
+  ${types.length ? types.map(renderType).join('') : '<p class="empty">Nothing differs. The full list of compared components is in the JSON report.</p>'}
+
+  <h2>Orgs</h2>
+  <table class="orgs">
+    <thead><tr><th>Baseline (source of truth)</th><th>Target</th></tr></thead>
+    <tbody><tr>${orgCell(report.baseline)}${orgCell(report.target)}</tr></tbody>
+  </table>
+  ${scope ? `<details class="scope"><summary>What was compared</summary><ul>${scopeList}</ul></details>` : ''}
+  <p class="note">${summary.unchanged} unchanged components are not listed. The JSON report has every component.</p>
+</main>
 </body>
 </html>`;
 }
@@ -99538,10 +99637,14 @@ function writeHtmlReport(report, outputDir) {
 
 
 
+
 const REPORT_MD_FILENAME = 'metadata-drift-report.md';
-const MAX_TABLE_ROWS = 20;
-const MAX_DIFF_LINES = 200;
-const MAX_VALUE_LENGTH = 2000;
+const MAX_LIST_ROWS = 200;
+const MAX_DETAIL_ROWS = 150;
+const markdown_MAX_DIFF_LINES = 200;
+const markdown_MAX_VALUE_LENGTH = 300;
+const STATUS_ICONS = { 'no-drift': '🟢', drift: '🟠', incomplete: '🔴' };
+const CATEGORY_ICONS = { added: '➕', removed: '➖', changed: '✏️', unchanged: '✅' };
 function escapeMd(text) {
     return text
         .replace(/&/g, '&amp;')
@@ -99560,133 +99663,153 @@ function code(text) {
     const padding = /^[` ]|[` ]$/.test(text) ? ' ' : '';
     return `${delimiter}${padding}${text.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|')}${padding}${delimiter}`;
 }
-function markdown_preview(value) {
-    if (value === undefined)
-        return '(none)';
-    const shortened = value.length > MAX_VALUE_LENGTH ? `${value.slice(0, MAX_VALUE_LENGTH)}... (full value in the JSON report)` : value;
-    return escapeMd(shortened);
-}
-function verdict(report) {
-    const { summary } = report;
-    if (report.outcome === 'incomplete') {
-        return '**Comparison incomplete.** Some metadata could not be retrieved or identified (see Warnings), ' +
-            'so a clean result cannot be confirmed. Differences that were found are listed below.';
-    }
-    if (summary.hasDrift) {
-        return `**Drift detected:** ${summary.added} added in target, ${summary.removed} missing from target, ` +
-            `${summary.changed} changed, ${summary.unchanged} unchanged.`;
-    }
-    return `**No drift detected.** All ${summary.unchanged} compared components match the baseline.`;
-}
-function orgTable(baseline, target) {
-    const row = (name, value) => `| ${name} | ${value(baseline) ?? ''} | ${value(target) ?? ''} |`;
-    return [
-        '| | Baseline (source of truth) | Target |',
-        '| --- | --- | --- |',
-        row('Label', (side) => escapeMd(side.label)),
-        row('Org type', (side) => side.orgKind),
-        row('Username', (side) => side.username && code(side.username)),
-        row('Org ID', (side) => side.orgId && code(side.orgId)),
-        row('Instance', (side) => side.instanceHost && code(side.instanceHost)),
-    ];
-}
-function typeBreakdown(components) {
-    const counts = new Map();
-    for (const component of components) {
-        const entry = counts.get(component.metadataType) ?? { added: 0, removed: 0, changed: 0, unchanged: 0 };
-        entry[component.category]++;
-        counts.set(component.metadataType, entry);
-    }
-    const rows = [...counts]
-        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .map(([type, c]) => `| ${escapeMd(type)} | ${c.added} | ${c.removed} | ${c.changed} | ${c.unchanged} |`);
-    return [
-        '| Metadata type | Added in target | Missing from target | Changed | Unchanged |',
-        '| --- | ---: | ---: | ---: | ---: |',
-        ...rows,
-    ];
-}
-function componentList(title, items) {
-    if (!items.length)
-        return [];
-    return [
-        `## ${title} (${items.length})`,
-        '',
-        '| Metadata type | Name |',
-        '| --- | --- |',
-        ...items.map((item) => `| ${escapeMd(item.metadataType)} | ${code(item.fullName)} |`),
-        '',
-    ];
+function markdown_value(text) {
+    if (text === undefined)
+        return '—';
+    if (text === '')
+        return '_empty_';
+    return code(text.length > markdown_MAX_VALUE_LENGTH ? `${text.slice(0, markdown_MAX_VALUE_LENGTH)}… (full value in the JSON report)` : text);
 }
 function fence(lines) {
     const longestRun = Math.max(2, ...lines.flatMap((line) => line.match(/`+/g) ?? []).map((run) => run.length));
     return '`'.repeat(longestRun + 1);
 }
-function lineDiff(changes) {
-    const lines = changes.slice(0, MAX_DIFF_LINES).map((change) => {
+/** A table, cut off after `limit` rows with a pointer to the JSON report. */
+function table(header, rows, limit = MAX_LIST_ROWS) {
+    const more = rows.length > limit ? [`_${rows.length - limit} more rows are in the JSON report._`, ''] : [];
+    return [
+        `| ${header.join(' | ')} |`,
+        `| ${header.map(() => '---').join(' | ')} |`,
+        ...rows.slice(0, limit).map((cells) => `| ${cells.join(' | ')} |`),
+        '',
+        ...more,
+    ];
+}
+function sorted(report) {
+    return differencesByType(report).flatMap(([, items]) => items);
+}
+function listSection(report, category) {
+    const items = sorted(report).filter((item) => item.category === category);
+    if (!items.length)
+        return [];
+    return [
+        `## ${CATEGORY_ICONS[category]} ${CATEGORY_LABELS[category]} (${items.length})`,
+        '',
+        ...table(['Type', 'Component'], items.map((item) => [escapeMd(item.metadataType), code(displayName(item.fullName))])),
+    ];
+}
+function settingRows(group) {
+    if (group.kind === 'changed') {
+        return group.rows.map((row) => [escapeMd([group.title, row.label].filter(Boolean).join(' › ')), markdown_value(row.baseline), markdown_value(row.target)]);
+    }
+    const settings = group.rows.map((row) => `${escapeMd(row.label)} ${markdown_value(row.baseline ?? row.target)}`).join(', ');
+    const cell = `${CATEGORY_ICONS[group.kind]} ${settings || (group.kind === 'added' ? 'added' : 'removed')}`;
+    return [[escapeMd(group.title), group.kind === 'removed' ? cell : '—', group.kind === 'added' ? cell : '—']];
+}
+function changedSection(report) {
+    const items = sorted(report).filter((item) => item.category === 'changed');
+    if (!items.length)
+        return [];
+    const detailRows = items.flatMap((item) => {
+        const changes = (item.fieldChanges ?? []).filter((change) => !isLineChange(change));
+        const rows = describeFieldChanges(item.metadataType, changes).flatMap(settingRows);
+        // Name the component once, on its first row, so each block reads as a unit.
+        return rows.map((cells, index) => [index ? '' : code(displayName(item.fullName)), ...cells]);
+    });
+    const codeChanges = items.filter((item) => (item.fieldChanges ?? []).some(isLineChange));
+    return [
+        `## ${CATEGORY_ICONS.changed} ${CATEGORY_LABELS.changed} (${items.length})`,
+        '',
+        ...table(['Type', 'Component', 'What changed'], items.map((item) => [escapeMd(item.metadataType), code(displayName(item.fullName)), escapeMd(summarizeComponent(item))])),
+        ...(detailRows.length
+            ? ['### Setting changes', '', ...table(['Component', 'Setting', 'Baseline', 'Target'], detailRows, MAX_DETAIL_ROWS)]
+            : []),
+        ...(codeChanges.length ? ['### Code changes', '', ...codeChanges.flatMap(codeDiff)] : []),
+    ];
+}
+function codeDiff(component) {
+    const changes = (component.fieldChanges ?? []).filter(isLineChange);
+    const lines = changes.slice(0, markdown_MAX_DIFF_LINES).map((change) => {
         const match = LINE_CHANGE_PATH.exec(change.path);
         return match?.[1] === 'baseline' ? `- ${change.baselineValue ?? ''}` : `+ ${change.targetValue ?? ''}`;
     });
     const marker = fence(lines);
-    const more = changes.length > MAX_DIFF_LINES
-        ? [`_${changes.length - MAX_DIFF_LINES} more changed line(s) are in the JSON report._`, '']
+    const more = changes.length > markdown_MAX_DIFF_LINES
+        ? [`_${changes.length - markdown_MAX_DIFF_LINES} more changed lines are in the JSON report._`, '']
         : [];
-    return [`${marker}diff`, ...lines, marker, '', ...more];
-}
-function fieldTable(changes) {
-    const rows = changes.slice(0, MAX_TABLE_ROWS)
-        .map((change) => `| ${code(change.path)} | ${markdown_preview(change.baselineValue)} | ${markdown_preview(change.targetValue)} |`);
-    const more = changes.length > MAX_TABLE_ROWS
-        ? [`_${changes.length - MAX_TABLE_ROWS} more difference(s) are in the JSON report._`, '']
-        : [];
-    return ['| Path | Baseline | Target |', '| --- | --- | --- |', ...rows, '', ...more];
-}
-function changedComponent(component) {
-    const changes = component.fieldChanges ?? [];
-    const lineChanges = changes.filter((change) => LINE_CHANGE_PATH.test(change.path));
-    const otherChanges = changes.filter((change) => !LINE_CHANGE_PATH.test(change.path));
-    const summary = component.summary ? `: ${markdown_escapeHtml(component.summary)}` : '';
     return [
         '<details>',
-        `<summary><strong>${markdown_escapeHtml(component.metadataType)}</strong> ${markdown_escapeHtml(component.fullName)}${summary}</summary>`,
+        `<summary><code>${markdown_escapeHtml(displayName(component.fullName))}</code> · ${markdown_escapeHtml(summarizeComponent(component))}</summary>`,
         '',
-        ...(lineChanges.length ? lineDiff(lineChanges) : []),
-        ...(otherChanges.length ? fieldTable(otherChanges) : []),
+        `${marker}diff`,
+        ...lines,
+        marker,
+        '',
+        ...more,
         '</details>',
         '',
     ];
 }
-function runLink(report) {
-    return report.runUrl ? ` from [this workflow run](${report.runUrl})` : '';
+function orgSection(baseline, target) {
+    const row = (name, read) => [name, read(baseline) ?? '—', read(target) ?? '—'];
+    return [
+        '## Orgs',
+        '',
+        ...table(['', 'Baseline (source of truth)', 'Target'], [
+            row('Name', (side) => `**${escapeMd(side.label)}**`),
+            row('Org type', (side) => side.orgKind),
+            row('Username', (side) => side.username && code(side.username)),
+            row('Org ID', (side) => side.orgId && code(side.orgId)),
+            row('Instance', (side) => side.instanceHost && code(side.instanceHost)),
+        ]),
+    ];
+}
+function scopeSection(report) {
+    const { scope } = report;
+    if (!scope)
+        return [];
+    const rows = [
+        ['API version', escapeMd(scope.apiVersion)],
+        ['Source', scope.kind === 'manifest' ? 'package-xml-path' : 'metadata-types'],
+        ...Object.entries(scope.members).map(([type, members]) => [code(type), members.map(code).join(', ')]),
+        ...scope.notes.map((note) => ['Note', escapeMd(note)]),
+        ...(report.retrievals ?? []).map((item) => [`Retrieved (${item.side})`, formatTimestamp(item.retrievedAt)]),
+    ];
+    return [
+        '<details>',
+        '<summary><b>What was compared</b></summary>',
+        '',
+        ...table(['Setting', 'Value'], rows, Number.POSITIVE_INFINITY),
+        '</details>',
+        '',
+    ];
 }
 function renderMarkdownReport(report) {
-    const byCategory = (category) => report.components.filter((component) => component.category === category);
-    const changed = byCategory('changed');
-    const { summary, scope } = report;
+    const { summary } = report;
+    const result = verdict(report);
+    const runLink = report.runUrl ? ` · [Workflow run](${report.runUrl})` : '';
+    const bold = (count) => (count ? `**${count}**` : '0');
     const lines = [
-        '# Salesforce Metadata Drift Report',
+        '<sub>SALESFORCE METADATA DRIFT REPORT</sub>',
         '',
-        verdict(report),
+        `# ${STATUS_ICONS[result.status]} ${result.title}`,
         '',
-        `Baseline: **${escapeMd(report.baseline.label)}**. Target: **${escapeMd(report.target.label)}**. ` +
-            `Generated ${report.generatedAt}${runLink(report)}.`,
+        escapeMd(result.detail),
+        '',
+        `Baseline **${escapeMd(report.baseline.label)}** → target **${escapeMd(report.target.label)}** · ` +
+            `${formatTimestamp(report.generatedAt)}${runLink}`,
         '',
     ];
     if (report.warnings.length) {
-        lines.push('## Warnings', '', ...report.warnings.map((warning) => `- ${escapeMd(warning)}`), '');
+        lines.push('> [!WARNING]', ...report.warnings.map((warning) => `> - ${escapeMd(warning)}`), '');
     }
-    lines.push('## Summary', '', '| Added in target | Missing from target | Changed | Unchanged | Total |', '| ---: | ---: | ---: | ---: | ---: |', `| ${summary.added} | ${summary.removed} | ${summary.changed} | ${summary.unchanged} | ${summary.total} |`, '');
-    if (report.components.length)
-        lines.push(...typeBreakdown(report.components), '');
-    lines.push(...componentList('Added in target (not in baseline)', byCategory('added')), ...componentList('Missing from target (only in baseline)', byCategory('removed')));
-    if (changed.length) {
-        lines.push(`## Changed (${changed.length})`, '', ...changed.flatMap(changedComponent));
-    }
-    lines.push('## Orgs', '', ...orgTable(report.baseline, report.target), '');
-    if (scope) {
-        lines.push('## Comparison scope', '', `API version ${escapeMd(scope.apiVersion)}, ${scope.kind === 'manifest' ? 'from package-xml-path' : 'from metadata-types'}.`, '', ...Object.entries(scope.members).map(([type, members]) => `- ${code(type)}: ${members.map(code).join(', ')}`), ...scope.notes.map((note) => `- ${escapeMd(note)}`), ...(report.retrievals ?? []).map((item) => `- ${item.side} retrieved at ${item.retrievedAt}`), '');
-    }
-    lines.push('Unchanged components are counted above and listed in the JSON report.');
+    lines.push('## Summary', '', ...table(['Result', 'Components'], [
+        [`${CATEGORY_ICONS.removed} ${CATEGORY_LABELS.removed}`, bold(summary.removed)],
+        [`${CATEGORY_ICONS.added} ${CATEGORY_LABELS.added}`, bold(summary.added)],
+        [`${CATEGORY_ICONS.changed} ${CATEGORY_LABELS.changed}`, bold(summary.changed)],
+        [`${CATEGORY_ICONS.unchanged} ${CATEGORY_LABELS.unchanged}`, String(summary.unchanged)],
+        ['**Total compared**', `**${summary.total}**`],
+    ]), ...listSection(report, 'removed'), ...listSection(report, 'added'), ...changedSection(report), ...orgSection(report.baseline, report.target), ...scopeSection(report), `<sub>${summary.unchanged} unchanged components are not listed. The JSON report in the workflow artifact has every component.</sub>`);
     return `${lines.join('\n').trimEnd()}\n`;
 }
 function writeMarkdownReport(report, outputDir) {

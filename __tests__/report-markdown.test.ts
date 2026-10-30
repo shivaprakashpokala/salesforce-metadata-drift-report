@@ -21,51 +21,58 @@ async function fixtureReport() {
 }
 
 describe('renderMarkdownReport', () => {
-  it('leads with the verdict and a per-type breakdown', async () => {
+  it('leads with the verdict and the counts', async () => {
     const md = renderMarkdownReport(await fixtureReport());
-    expect(md).toContain('**Drift detected:** 2 added in target, 1 missing from target, 3 changed, 2 unchanged.');
-    expect(md).toContain('Baseline: **Production**. Target: **QA sandbox**.');
-    expect(md).toContain('[this workflow run](https://github.com/example/repo/actions/runs/1)');
-    expect(md).toContain('| Metadata type | Added in target | Missing from target | Changed | Unchanged |');
-    expect(md).toContain('| ApexClass | 0 | 0 | 1 | 0 |');
-    expect(md.indexOf('## Summary')).toBeLessThan(md.indexOf('## Orgs'));
+    expect(md).toContain('# 🟠 Drift found\n\n6 of 8 components differ between Production and QA sandbox.');
+    expect(md).toContain('Baseline **Production** → target **QA sandbox**');
+    expect(md).toContain('[Workflow run](https://github.com/example/repo/actions/runs/1)');
+    expect(md).toContain('| ➕ Only in target | **2** |');
+    expect(md).toContain('| ➖ Missing from target | **1** |');
+    expect(md).toContain('| ✏️ Changed | **3** |');
+    expect(md).toContain('| ✅ Unchanged | 2 |');
+    expect(md).toContain('| **Total compared** | **8** |');
   });
 
-  it('lists added and missing components as tables', async () => {
+  it('lists each kind of difference in its own table section', async () => {
     const md = renderMarkdownReport(await fixtureReport());
-    expect(md).toContain('## Added in target (not in baseline) (2)');
+    const sections = ['## Summary', '## ➖ Missing from target (1)', '## ➕ Only in target (2)', '## ✏️ Changed (3)', '## Orgs'];
+    const positions = sections.map((heading) => md.indexOf(heading));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
     expect(md).toContain('| PermissionSet | `Sales_User` |');
-    expect(md).toContain('## Missing from target (only in baseline) (1)');
-    expect(md).toContain('| CustomApplication | `Sales_Console` |');
+    expect(md).toContain('| ApexClass | `AccountService` | 5 lines added, 0 removed |');
+    expect(md).toContain('| Profile | `Admin` | Field permissions › Account.Industry\\_\\_c › Readable: true → false |');
   });
 
-  it('puts each changed component in a collapsible block with an Apex diff', async () => {
+  it('puts setting changes in one table and Apex diffs in collapsible blocks', async () => {
     const md = renderMarkdownReport(await fixtureReport());
-    expect(md).toContain('<summary><strong>ApexClass</strong> AccountService: ');
+    expect(md).toContain('### Setting changes\n\n| Component | Setting | Baseline | Target |');
+    expect(md).toContain('| `Admin` | Field permissions › Account.Industry\\_\\_c › Readable | `true` | `false` |');
+    expect(md).toContain('<summary><code>AccountService</code> · 5 lines added, 0 removed</summary>');
     expect(md).toMatch(/```diff\n(?:[-+] .*\n)+```/);
     expect(md).toContain('+     public static List<Account> findByIndustry(String industry) {');
-    expect(md).toContain('| `Profile.fieldPermissions[Account.Industry__c].readable` | true | false |');
   });
 
-  it('renders a no-drift verdict without change sections', async () => {
+  it('renders a no-drift verdict without a differences section', async () => {
     const tree = await normalizeMetadataTree(ORG_A);
     const md = renderMarkdownReport(diffMetadataTrees(tree, tree));
-    expect(md).toContain('**No drift detected.**');
-    expect(md).not.toContain('## Added in target');
-    expect(md).not.toContain('## Changed');
+    expect(md).toContain('# 🟢 No drift');
+    expect(md).not.toContain('## ✏️ Changed');
+    expect(md).toContain('## Summary');
   });
 
-  it('shows warnings near the top', async () => {
+  it('shows warnings above the differences', async () => {
     const report = await fixtureReport();
     report.warnings = ['Baseline and target are the same org (same Org ID).'];
     const md = renderMarkdownReport(report);
-    expect(md.indexOf('## Warnings')).toBeLessThan(md.indexOf('## Summary'));
+    expect(md).toContain('> [!WARNING]\n> - Baseline and target are the same org (same Org ID).');
+    expect(md.indexOf('[!WARNING]')).toBeLessThan(md.indexOf('## Summary'));
   });
 
   it('writes metadata-drift-report.md', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-report-md-'));
     const file = writeMarkdownReport(await fixtureReport(), dir);
-    expect(fs.readFileSync(file, 'utf8')).toContain('# Salesforce Metadata Drift Report');
+    expect(fs.readFileSync(file, 'utf8')).toContain('SALESFORCE METADATA DRIFT REPORT');
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });

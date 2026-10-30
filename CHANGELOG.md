@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Clearer reports. The HTML report opens with the verdict and the counts, then lists differences grouped by metadata type, with a one-line description of each change (for example "Length: 50 → 80").
+- The Job Summary is laid out as tables in fixed sections: Summary, Missing from target, Only in target, Changed (with one table of setting changes and collapsible Apex diffs), Orgs, and What was compared. It reads in full on the workflow run page without downloading the HTML report.
+- Settings inside a component are shown in plain words, such as "Object permissions › Account › Allow edit", instead of XML paths. An entry that exists in only one org is shown once, marked as only in target or missing from target.
+- The HTML report has a light and a dark theme, follows the system setting, and works at phone width. URL-encoded names such as `Force%2Ecom - Free User` are shown decoded.
+
 ### Fixed
 
 - Notices from the Salesforce CLI itself, such as deprecation warnings, are shown in the report but no longer make the comparison incomplete. Only problems the Metadata API reports for the retrieve do.

@@ -1,8 +1,24 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { ComponentChange, DriftReport, FieldChange, OrgKind } from '../types.js';
+import type { ComponentChange, DriftReport, FieldChange, OrgSideInfo } from '../types.js';
+import {
+  CATEGORY_LABELS,
+  describeFieldChanges,
+  differencesByType,
+  displayName,
+  formatTimestamp,
+  isLineChange,
+  summarizeComponent,
+  verdict,
+  type ChangeGroup,
+} from './describe.js';
+import { LINE_CHANGE_PATH } from '../handlers/apex.js';
 
 export const REPORT_HTML_FILENAME = 'metadata-drift-report.html';
+
+const MAX_ROWS = 50;
+const MAX_DIFF_LINES = 300;
+const MAX_VALUE_LENGTH = 2000;
 
 function escapeHtml(text: string): string {
   return text
@@ -12,124 +28,97 @@ function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;');
 }
 
-function renderFieldChanges(changes: FieldChange[]): string {
-  if (!changes.length) return '';
-  const rows = changes
-    .slice(0, 50)
-    .map(
-      (c) => `
-        <tr>
-          <td><code>${escapeHtml(c.path)}</code></td>
-          <td class="baseline">${escapeHtml(preview(c.baselineValue ?? '—'))}</td>
-          <td class="target">${escapeHtml(preview(c.targetValue ?? '—'))}</td>
-        </tr>`,
-    )
-    .join('');
-
-  const more =
-    changes.length > 50
-      ? `<p class="muted">${changes.length - 50} more differences are in the JSON report.</p>`
-      : '';
-
-  return `
-    <details>
-      <summary>${changes.length} field-level change(s)</summary>
-      <table class="field-changes">
-        <thead><tr><th>Path</th><th>Baseline</th><th>Target</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-      ${more}
-    </details>`;
+function value(text: string | undefined): string {
+  if (text === undefined) return '<span class="none">—</span>';
+  if (text === '') return '<span class="none">empty</span>';
+  const shortened = text.length > MAX_VALUE_LENGTH ? `${text.slice(0, MAX_VALUE_LENGTH)}… (full value in the JSON report)` : text;
+  return `<code>${escapeHtml(shortened)}</code>`;
 }
 
-function preview(value: string): string {
-  return value.length > 2000 ? `${value.slice(0, 2000)}... (full value in the JSON report)` : value;
-}
-
-function renderComponent(c: ComponentChange): string {
-  const badgeClass = c.category;
-  const fieldSection =
-    c.category === 'changed' && c.fieldChanges?.length
-      ? renderFieldChanges(c.fieldChanges)
-      : '';
-
-  return `
-    <article class="component ${badgeClass}">
-      <header>
-        <span class="badge ${badgeClass}">${c.category}</span>
-        <strong>${escapeHtml(c.metadataType)}</strong>
-        <span class="name">${escapeHtml(c.fullName)}</span>
-      </header>
-      ${c.summary ? `<p class="summary">${escapeHtml(c.summary)}</p>` : ''}
-      <div class="paths">
-        ${c.baselinePath ? `<span>Baseline: <code>${escapeHtml(c.baselinePath)}</code></span>` : ''}
-        ${c.targetPath ? `<span>Target: <code>${escapeHtml(c.targetPath)}</code></span>` : ''}
-      </div>
-      ${fieldSection}
-    </article>`;
-}
-
-function renderOrgSide(title: string, label: string, orgKind: OrgKind, details: {
-  username?: string;
-  orgId?: string;
-  instanceHost?: string;
-}): string {
-  const meta: string[] = [];
-  if (details.username) meta.push(`User: <code>${escapeHtml(details.username)}</code>`);
-  if (details.orgId) meta.push(`Org ID: <code>${escapeHtml(details.orgId)}</code>`);
-  if (details.instanceHost) meta.push(`Host: <code>${escapeHtml(details.instanceHost)}</code>`);
-
-  return `
-    <div class="org-side">
-      <div class="org-side-title">${escapeHtml(title)}</div>
-      <div class="org-side-header">
-        <span class="kind-badge kind-${escapeHtml(orgKind)}">${escapeHtml(orgKind)}</span>
-        <strong>${escapeHtml(label)}</strong>
-      </div>
-      ${meta.length ? `<div class="org-side-meta">${meta.join(' · ')}</div>` : ''}
-    </div>`;
-}
-
-function renderWarnings(warnings: string[]): string {
-  if (!warnings.length) return '';
-  const items = warnings.map((w) => `<li>${escapeHtml(w)}</li>`).join('');
-  return `
-    <div class="callout" role="note">
-      <strong>Warnings</strong>
-      <ul>${items}</ul>
-    </div>`;
-}
-
-function groupByCategory(report: DriftReport): Record<string, ComponentChange[]> {
-  const groups: Record<string, ComponentChange[]> = {
-    added: [],
-    removed: [],
-    changed: [],
-    unchanged: [],
-  };
-  for (const c of report.components) {
-    groups[c.category].push(c);
+function renderGroup(group: ChangeGroup): string {
+  const title = group.title ? `<div class="group-title">${escapeHtml(group.title)}${
+    group.kind !== 'changed' ? ` <span class="tag ${group.kind === 'added' ? 'added' : 'removed'}">${group.kind === 'added' ? 'only in target' : 'missing from target'}</span>` : ''
+  }</div>` : '';
+  if (group.kind !== 'changed') {
+    const settings = group.rows
+      .map((row) => `<span class="setting">${escapeHtml(row.label)} ${value(row.target ?? row.baseline)}</span>`)
+      .join('');
+    return `<div class="group">${title}${settings ? `<div class="settings">${settings}</div>` : ''}</div>`;
   }
-  return groups;
+  const rows = group.rows.map((row) => `
+        <tr><th scope="row">${escapeHtml(row.label)}</th><td class="before">${value(row.baseline)}</td><td class="after">${value(row.target)}</td></tr>`).join('');
+  return `<div class="group">${title}<table class="values"><thead><tr><th></th><th>Baseline</th><th>Target</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function renderLineDiff(changes: FieldChange[]): string {
+  const lines = changes.slice(0, MAX_DIFF_LINES).map((change) => {
+    const match = LINE_CHANGE_PATH.exec(change.path);
+    const removed = match?.[1] === 'baseline';
+    const text = removed ? change.baselineValue : change.targetValue;
+    return `<span class="${removed ? 'del' : 'ins'}"><span class="ln">${match?.[2] ?? ''}</span>${removed ? '−' : '+'} ${escapeHtml(text ?? '')}</span>`;
+  });
+  const more = changes.length > MAX_DIFF_LINES ? `<p class="note">${changes.length - MAX_DIFF_LINES} more changed lines are in the JSON report.</p>` : '';
+  return `<pre class="diff">${lines.join('')}</pre>${more}`;
+}
+
+function renderComponent(component: ComponentChange): string {
+  const name = `<span class="name">${escapeHtml(displayName(component.fullName))}</span>`;
+  if (component.category !== 'changed') {
+    return `<li class="item">${name}<span class="tag ${component.category}">${CATEGORY_LABELS[component.category]}</span></li>`;
+  }
+  const changes = component.fieldChanges ?? [];
+  const lineChanges = changes.filter(isLineChange);
+  const groups = describeFieldChanges(component.metadataType, changes.filter((change) => !isLineChange(change)));
+  const shown = groups.slice(0, MAX_ROWS);
+  const more = groups.length > MAX_ROWS ? `<p class="note">${groups.length - MAX_ROWS} more differences are in the JSON report.</p>` : '';
+  return `
+      <li class="item">
+        <details>
+          <summary>${name}<span class="hint">${escapeHtml(summarizeComponent(component))}</span></summary>
+          <div class="body">
+            ${lineChanges.length ? renderLineDiff(lineChanges) : ''}
+            ${shown.map(renderGroup).join('')}
+            ${more}
+          </div>
+        </details>
+      </li>`;
+}
+
+function renderType([type, items]: [string, ComponentChange[]]): string {
+  const counts = (['removed', 'added', 'changed'] as const)
+    .map((category) => [category, items.filter((item) => item.category === category).length] as const)
+    .filter(([, count]) => count)
+    .map(([category, count]) => `${count} ${CATEGORY_LABELS[category].toLowerCase()}`)
+    .join(' · ');
+  return `
+    <section class="type">
+      <h3>${escapeHtml(type)} <span class="type-count">${counts}</span></h3>
+      <ul class="items">${items.map(renderComponent).join('')}</ul>
+    </section>`;
+}
+
+function orgCell(org: OrgSideInfo): string {
+  const details = [
+    org.username && `<div>${escapeHtml(org.username)}</div>`,
+    org.orgId && `<div class="sub">Org ID ${escapeHtml(org.orgId)}</div>`,
+    org.instanceHost && `<div class="sub">${escapeHtml(org.instanceHost)}</div>`,
+  ].filter(Boolean).join('');
+  return `<td><div class="org-name">${escapeHtml(org.label)} <span class="kind kind-${escapeHtml(org.orgKind)}">${escapeHtml(org.orgKind)}</span></div>${details}</td>`;
 }
 
 export function renderHtmlReport(report: DriftReport): string {
-  const groups = groupByCategory(report);
-  const { summary, baseline, target, warnings, generatedAt } = report;
-  const verdict = report.outcome === 'incomplete'
-    ? 'Comparison incomplete. Some metadata could not be retrieved or identified, so a clean result cannot be confirmed.'
-    : summary.hasDrift
-      ? `Drift detected: ${summary.added} added in target, ${summary.removed} missing from target, ${summary.changed} changed.`
-      : `No drift detected. All ${summary.unchanged} compared components match the baseline.`;
-
-  const section = (title: string, items: ComponentChange[], id: string) => {
-    if (!items.length) return '';
-    return `
-      <section id="${id}">
-        <h2>${title} <span class="count">(${items.length})</span></h2>
-        ${items.map(renderComponent).join('\n')}
-      </section>`;
-  };
+  const { summary, scope } = report;
+  const result = verdict(report);
+  const types = differencesByType(report);
+  const stat = (label: string, count: number, kind: string) =>
+    `<div class="stat ${count ? kind : 'zero'}"><div class="stat-value">${count}</div><div class="stat-label">${label}</div></div>`;
+  const runLink = report.runUrl ? ` · <a href="${escapeHtml(report.runUrl)}">Workflow run</a>` : '';
+  const scopeList = scope ? [
+    `<li>API version ${escapeHtml(scope.apiVersion)}, ${scope.kind === 'manifest' ? 'from package-xml-path' : 'from metadata-types'}</li>`,
+    ...Object.entries(scope.members).map(([type, members]) => `<li><strong>${escapeHtml(type)}</strong>: ${escapeHtml(members.join(', '))}</li>`),
+    ...scope.notes.map((note) => `<li>${escapeHtml(note)}</li>`),
+    ...(report.retrievals ?? []).map((item) => `<li>${escapeHtml(item.side)} retrieved ${escapeHtml(formatTimestamp(item.retrievedAt))}</li>`),
+  ].join('') : '';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -139,160 +128,112 @@ export function renderHtmlReport(report: DriftReport): string {
   <title>Salesforce Metadata Drift Report</title>
   <style>
     :root {
-      --bg: #0f172a;
-      --surface: #1e293b;
-      --border: #334155;
-      --text: #e2e8f0;
-      --muted: #94a3b8;
-      --added: #22c55e;
-      --removed: #ef4444;
-      --changed: #f59e0b;
-      --unchanged: #64748b;
+      color-scheme: light dark;
+      --bg: #ffffff; --surface: #f6f8fa; --border: #d8dee4; --text: #1f2328; --muted: #656d76;
+      --green: #1a7f37; --green-bg: #dafbe1; --red: #cf222e; --red-bg: #ffebe9;
+      --amber: #9a6700; --amber-bg: #fff8c5; --blue: #0969da;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8d96a0;
+        --green: #3fb950; --green-bg: #12261e; --red: #f85149; --red-bg: #2d1416;
+        --amber: #d29922; --amber-bg: #2b2111; --blue: #4493f8;
+      }
     }
     * { box-sizing: border-box; }
-    body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      margin: 0;
-      padding: 2rem;
-      line-height: 1.5;
-    }
-    h1 { margin-top: 0; }
-    .meta { color: var(--muted); margin-bottom: 2rem; }
-    .summary-cards {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-      gap: 1rem;
-      margin-bottom: 2rem;
-    }
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1rem;
-      text-align: center;
-    }
-    .card .value { font-size: 2rem; font-weight: 700; }
-    .card.added .value { color: var(--added); }
-    .card.removed .value { color: var(--removed); }
-    .card.changed .value { color: var(--changed); }
-    .card.unchanged .value { color: var(--unchanged); }
-    section { margin-bottom: 2.5rem; }
-    section h2 { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
-    .count { color: var(--muted); font-weight: normal; }
-    .component {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1rem;
-      margin-bottom: 0.75rem;
-    }
-    .component header { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
-    .badge {
-      font-size: 0.75rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      padding: 0.15rem 0.5rem;
-      border-radius: 4px;
-    }
-    .badge.added { background: color-mix(in srgb, var(--added) 25%, transparent); color: var(--added); }
-    .badge.removed { background: color-mix(in srgb, var(--removed) 25%, transparent); color: var(--removed); }
-    .badge.changed { background: color-mix(in srgb, var(--changed) 25%, transparent); color: var(--changed); }
-    .badge.unchanged { background: color-mix(in srgb, var(--unchanged) 25%, transparent); color: var(--unchanged); }
-    .name { color: var(--muted); }
-    .paths { font-size: 0.85rem; color: var(--muted); display: flex; flex-direction: column; gap: 0.25rem; }
-    code { background: var(--bg); padding: 0.1rem 0.35rem; border-radius: 3px; font-size: 0.85em; }
-    details { margin-top: 0.75rem; }
-    table.field-changes {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.85rem;
-      margin-top: 0.5rem;
-    }
-    table.field-changes th, table.field-changes td {
-      border: 1px solid var(--border);
-      padding: 0.4rem 0.6rem;
-      text-align: left;
-      vertical-align: top;
-    }
-    table.field-changes .baseline { color: #fca5a5; }
-    table.field-changes .target { color: #86efac; }
-    .muted { color: var(--muted); font-size: 0.85rem; }
-    nav.toc { margin-bottom: 2rem; }
-    nav.toc a { color: #60a5fa; margin-right: 1rem; }
-    .org-header {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-    }
-    .org-side {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1rem;
-    }
-    .org-side-title { color: var(--muted); font-size: 0.85rem; margin-bottom: 0.35rem; }
-    .org-side-header { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
-    .org-side-meta { color: var(--muted); font-size: 0.85rem; margin-top: 0.5rem; }
-    .kind-badge {
-      font-size: 0.7rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-      padding: 0.15rem 0.45rem;
-      border-radius: 999px;
-      border: 1px solid var(--border);
-    }
-    .kind-scratch { color: #c084fc; border-color: #7e22ce; }
-    .kind-sandbox { color: #67e8f9; border-color: #0e7490; }
-    .kind-developer { color: #93c5fd; border-color: #1d4ed8; }
-    .kind-production { color: #86efac; border-color: #15803d; }
-    .kind-unknown { color: #fcd34d; border-color: #b45309; }
-    .callout {
-      background: color-mix(in srgb, #f59e0b 12%, var(--surface));
-      border: 1px solid #b45309;
-      border-radius: 8px;
-      padding: 1rem 1.25rem;
-      margin-bottom: 2rem;
-    }
-    .callout ul { margin: 0.5rem 0 0; padding-left: 1.25rem; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+    main { max-width: 980px; margin: 0 auto; padding: 32px 16px 64px; }
+    a { color: var(--blue); }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+    .eyebrow { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .04em; margin: 0 0 6px; }
+    .verdict { border-left: 4px solid var(--status); padding: 4px 0 4px 16px; margin-bottom: 24px; }
+    .verdict.drift { --status: var(--amber); } .verdict.no-drift { --status: var(--green); } .verdict.incomplete { --status: var(--red); }
+    .verdict h1 { margin: 0; font-size: 28px; line-height: 1.25; }
+    .verdict p { margin: 4px 0 0; }
+    .route { color: var(--muted); font-size: 14px; margin-top: 6px !important; }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+    .stat { border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
+    .stat-value { font-size: 26px; font-weight: 600; line-height: 1.2; font-variant-numeric: tabular-nums; }
+    .stat-label { color: var(--muted); font-size: 13px; }
+    .stat.added .stat-value { color: var(--green); } .stat.removed .stat-value { color: var(--red); }
+    .stat.changed .stat-value { color: var(--amber); } .stat.zero .stat-value { color: var(--muted); }
+    .warnings { background: var(--amber-bg); border: 1px solid var(--amber); border-radius: 8px; padding: 12px 16px; margin-bottom: 24px; }
+    .warnings ul { margin: 6px 0 0; padding-left: 20px; }
+    h2 { font-size: 18px; margin: 32px 0 12px; }
+    .type { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+    .type h3 { margin: 0; padding: 10px 16px; font-size: 15px; background: var(--surface); border-bottom: 1px solid var(--border); }
+    .type-count { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 6px; }
+    .items { list-style: none; margin: 0; padding: 0; }
+    .item { border-top: 1px solid var(--border); }
+    .item:first-child { border-top: 0; }
+    .item > .name, .item > .tag { display: inline-block; }
+    li.item:not(:has(details)) { padding: 9px 16px; }
+    summary { cursor: pointer; padding: 9px 16px; list-style-position: inside; }
+    summary:hover { background: var(--surface); }
+    .name { font-weight: 600; word-break: break-word; }
+    .tag { font-size: 12px; font-weight: 500; border-radius: 999px; padding: 1px 8px; margin-left: 8px; white-space: nowrap; }
+    .tag.added { color: var(--green); background: var(--green-bg); }
+    .tag.removed { color: var(--red); background: var(--red-bg); }
+    .tag.changed { color: var(--amber); background: var(--amber-bg); }
+    .hint { display: block; color: var(--muted); font-size: 13px; margin: 2px 0 0 18px; }
+    .body { padding: 4px 16px 16px; }
+    .group { margin-top: 12px; }
+    .group-title { font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+    .settings { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--muted); font-size: 13px; }
+    .settings code { color: var(--text); }
+    table.values { border-collapse: collapse; width: 100%; font-size: 13px; }
+    table.values th, table.values td { text-align: left; vertical-align: top; padding: 5px 10px; border-bottom: 1px solid var(--border); }
+    table.values thead th { color: var(--muted); font-weight: 500; }
+    table.values tbody th { font-weight: 500; width: 30%; }
+    td.before code { color: var(--red); } td.after code { color: var(--green); }
+    td code { white-space: pre-wrap; word-break: break-word; }
+    .none { color: var(--muted); }
+    pre.diff { margin: 12px 0 0; padding: 8px 0; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; line-height: 1.45; }
+    pre.diff > span { display: block; padding: 0 12px; white-space: pre; }
+    pre.diff .del { background: var(--red-bg); } pre.diff .ins { background: var(--green-bg); }
+    pre.diff .ln { display: inline-block; min-width: 3.5em; color: var(--muted); user-select: none; }
+    .note { color: var(--muted); font-size: 13px; }
+    .empty { color: var(--muted); border: 1px dashed var(--border); border-radius: 8px; padding: 16px; }
+    table.orgs { border-collapse: collapse; width: 100%; font-size: 14px; }
+    table.orgs th, table.orgs td { text-align: left; vertical-align: top; padding: 8px 12px; border: 1px solid var(--border); width: 50%; }
+    table.orgs th { background: var(--surface); font-weight: 500; color: var(--muted); }
+    .org-name { font-weight: 600; } .sub { color: var(--muted); font-size: 13px; }
+    .kind { font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; margin-left: 4px; }
+    details.scope { margin-top: 16px; color: var(--muted); font-size: 14px; }
+    details.scope summary { padding: 4px 0; }
+    details.scope ul { margin: 6px 0 0; padding-left: 20px; }
+    @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } .verdict h1 { font-size: 24px; } }
   </style>
 </head>
 <body>
-  <h1>Salesforce Metadata Drift Report</h1>
-  <p class="meta">Generated: ${escapeHtml(generatedAt)}${report.runUrl ? ` from <a href="${escapeHtml(report.runUrl)}">this workflow run</a>` : ''}<br /><strong>${escapeHtml(verdict)}</strong></p>
-
-  <div class="org-header">
-    ${renderOrgSide('Baseline (source of truth)', baseline.label, baseline.orgKind, baseline)}
-    ${renderOrgSide('Target', target.label, target.orgKind, target)}
+<main>
+  <p class="eyebrow">Salesforce metadata drift report</p>
+  <div class="verdict ${result.status}">
+    <h1>${escapeHtml(result.title)}</h1>
+    <p>${escapeHtml(result.detail)}</p>
+    <p class="route">Baseline <strong>${escapeHtml(report.baseline.label)}</strong> → target <strong>${escapeHtml(report.target.label)}</strong> · ${escapeHtml(formatTimestamp(report.generatedAt))}${runLink}</p>
   </div>
 
-  ${renderWarnings(warnings)}
-  ${report.scope ? `<section><h2>Comparison scope</h2><p>API version ${escapeHtml(report.scope.apiVersion)}, ${report.scope.kind === 'manifest' ? 'from package-xml-path' : 'from metadata-types'}.</p><ul>${
-    Object.entries(report.scope.members).map(([type, members]) => `<li>${escapeHtml(type)}: ${escapeHtml(members.join(', '))}</li>`).join('')
-  }${report.scope.notes.map((note) => `<li>${escapeHtml(note)}</li>`).join('')}${
-    (report.retrievals ?? []).map((item) => `<li>${escapeHtml(item.side)} retrieved: ${escapeHtml(item.retrievedAt)}</li>`).join('')
-  }</ul></section>` : ''}
-
-  <div class="summary-cards">
-    <div class="card added"><div class="value">${summary.added}</div><div>Added in target</div></div>
-    <div class="card removed"><div class="value">${summary.removed}</div><div>Missing from target</div></div>
-    <div class="card changed"><div class="value">${summary.changed}</div><div>Changed</div></div>
-    <div class="card unchanged"><div class="value">${summary.unchanged}</div><div>Unchanged</div></div>
+  <div class="stats">
+    ${stat('Only in target', summary.added, 'added')}
+    ${stat('Missing from target', summary.removed, 'removed')}
+    ${stat('Changed', summary.changed, 'changed')}
+    ${stat('Unchanged', summary.unchanged, 'unchanged')}
   </div>
 
-  <nav class="toc">
-    <a href="#added">Added (${summary.added})</a>
-    <a href="#removed">Missing (${summary.removed})</a>
-    <a href="#changed">Changed (${summary.changed})</a>
-  </nav>
-  <p class="muted">Unchanged components (${summary.unchanged}) are counted above. The full list is in the JSON report.</p>
+  ${report.warnings.length ? `<div class="warnings" role="note"><strong>Warnings</strong><ul>${report.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}</ul></div>` : ''}
 
-  ${section('Added in target (not in baseline)', groups.added, 'added')}
-  ${section('Missing from target (only in baseline)', groups.removed, 'removed')}
-  ${section('Changed', groups.changed, 'changed')}
+  <h2>Differences</h2>
+  ${types.length ? types.map(renderType).join('') : '<p class="empty">Nothing differs. The full list of compared components is in the JSON report.</p>'}
+
+  <h2>Orgs</h2>
+  <table class="orgs">
+    <thead><tr><th>Baseline (source of truth)</th><th>Target</th></tr></thead>
+    <tbody><tr>${orgCell(report.baseline)}${orgCell(report.target)}</tr></tbody>
+  </table>
+  ${scope ? `<details class="scope"><summary>What was compared</summary><ul>${scopeList}</ul></details>` : ''}
+  <p class="note">${summary.unchanged} unchanged components are not listed. The JSON report has every component.</p>
+</main>
 </body>
 </html>`;
 }
