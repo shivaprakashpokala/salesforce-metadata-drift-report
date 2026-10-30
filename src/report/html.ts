@@ -99,6 +99,7 @@ function renderType([type, items]: [string, ComponentChange[]]): string {
 
 function orgCell(org: OrgSideInfo): string {
   const details = [
+    org.organizationName && org.organizationName !== org.label && `<div class="sub">${escapeHtml(org.organizationName)}</div>`,
     org.username && `<div>${escapeHtml(org.username)}</div>`,
     org.orgId && `<div class="sub">Org ID ${escapeHtml(org.orgId)}</div>`,
     org.instanceHost && `<div class="sub">${escapeHtml(org.instanceHost)}</div>`,

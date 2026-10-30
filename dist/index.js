@@ -99491,6 +99491,7 @@ function renderType([type, items]) {
 }
 function orgCell(org) {
     const details = [
+        org.organizationName && org.organizationName !== org.label && `<div class="sub">${escapeHtml(org.organizationName)}</div>`,
         org.username && `<div>${escapeHtml(org.username)}</div>`,
         org.orgId && `<div class="sub">Org ID ${escapeHtml(org.orgId)}</div>`,
         org.instanceHost && `<div class="sub">${escapeHtml(org.instanceHost)}</div>`,
@@ -99759,6 +99760,7 @@ function orgSection(baseline, target) {
         '',
         ...table(['Org', 'Baseline (source of truth)', 'Target'], [
             row('Name', (side) => `**${escapeMd(side.label)}**`),
+            row('Company', (side) => side.organizationName && escapeMd(side.organizationName)),
             row('Org type', (side) => side.orgKind),
             row('Username', (side) => side.username && code(side.username)),
             row('Org ID', (side) => side.orgId && code(side.orgId)),
@@ -150122,6 +150124,14 @@ function classifyOrgKind(fields) {
         return 'developer';
     return 'unknown';
 }
+/**
+ * The org's My Domain name, which is how people tell orgs apart:
+ * "acme.my.salesforce.com" → "acme", "acme--uat.sandbox.my.salesforce.com" → "acme--uat".
+ * Undefined for instance URLs without My Domain, such as "na1.salesforce.com".
+ */
+function instanceName(host) {
+    return /^([^.]+)\.(?:[a-z]+\.)?my\.[^.]+\.[a-z.]+$/.exec(host ?? '')?.[1];
+}
 function safeHost(instanceUrl) {
     try {
         return new URL(instanceUrl).hostname.toLowerCase();
@@ -150134,12 +150144,14 @@ function orgSideFromDisplay(display, fallbackLabel, userLabel) {
     if (!display) {
         return { label: userLabel ?? fallbackLabel, orgKind: 'unknown' };
     }
+    const instanceHost = display.instanceUrl ? safeHost(display.instanceUrl) : undefined;
     return {
-        label: userLabel ?? display.organizationName ?? display.username ?? fallbackLabel,
+        label: userLabel ?? instanceName(instanceHost) ?? display.organizationName ?? display.username ?? fallbackLabel,
+        organizationName: display.organizationName,
         orgKind: classifyOrgKind(display),
         username: display.username,
         orgId: display.id,
-        instanceHost: display.instanceUrl ? safeHost(display.instanceUrl) : undefined,
+        instanceHost,
     };
 }
 /** An error message when both inputs log in to the same org, which can never show drift. */
@@ -150155,8 +150167,9 @@ function sandboxName(host) {
     return /^[^.]+--([^.]+)\.sandbox\.my\.salesforce\.com$/.exec(host ?? '')?.[1];
 }
 /**
- * Sandboxes copy the production company name, so two sandboxes of one org
- * would both be called "Acme". Add the sandbox name (or org type) to tell them apart.
+ * Two orgs can still share a label, for example a label set by the user or two
+ * orgs without My Domain named after the same company. Add the sandbox name (or
+ * org type) to tell them apart.
  */
 function distinguishLabels(baseline, target, userLabels = {}) {
     if (baseline.label !== target.label)
@@ -150183,6 +150196,19 @@ function buildOrgWarnings(baseline, target) {
         warnings.push(`The baseline is a ${baseline.orgKind} org and the target is production. The baseline is treated as the ` +
             'source of truth, so "Only in target" and "Missing from target" read the other way round from what you may ' +
             'expect. If production should be the reference, swap baseline-auth-url and target-auth-url.');
+    }
+    // A sandbox's My Domain is its production org's name plus "--sandbox", so
+    // orgs of one company share the part before "--". Scratch and Developer
+    // Edition orgs stand alone and are compared with anything.
+    const standalone = ['scratch', 'developer'];
+    const names = [instanceName(baseline.instanceHost), instanceName(target.instanceHost)];
+    if (names[0] && names[1] && !standalone.includes(baseline.orgKind) && !standalone.includes(target.orgKind)) {
+        const [baselineRoot, targetRoot] = names.map((name) => name.toLowerCase().split('--')[0]);
+        if (baselineRoot !== targetRoot) {
+            warnings.push(`Baseline ${names[0]} and target ${names[1]} belong to different production orgs (${baselineRoot} and ` +
+                `${targetRoot}). That is expected when comparing separate orgs, such as two regional orgs or a template ` +
+                'org; otherwise check that baseline-auth-url and target-auth-url hold the right secrets.');
+        }
     }
     const unknown = [
         baseline.orgKind === 'unknown' ? 'baseline' : '',

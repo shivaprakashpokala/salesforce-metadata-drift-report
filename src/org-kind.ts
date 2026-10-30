@@ -3,6 +3,8 @@ export type OrgKind = 'scratch' | 'sandbox' | 'developer' | 'production' | 'unkn
 export interface OrgSideInfo {
   label: string;
   orgKind: OrgKind;
+  /** Company name from the Organization record. Sandboxes copy it from production. */
+  organizationName?: string;
   username?: string;
   orgId?: string;
   instanceHost?: string;
@@ -55,6 +57,15 @@ export function classifyOrgKind(fields: SfOrgDisplayFields): OrgKind {
   return 'unknown';
 }
 
+/**
+ * The org's My Domain name, which is how people tell orgs apart:
+ * "acme.my.salesforce.com" → "acme", "acme--uat.sandbox.my.salesforce.com" → "acme--uat".
+ * Undefined for instance URLs without My Domain, such as "na1.salesforce.com".
+ */
+export function instanceName(host?: string): string | undefined {
+  return /^([^.]+)\.(?:[a-z]+\.)?my\.[^.]+\.[a-z.]+$/.exec(host ?? '')?.[1];
+}
+
 function safeHost(instanceUrl: string): string {
   try {
     return new URL(instanceUrl).hostname.toLowerCase();
@@ -71,12 +82,14 @@ export function orgSideFromDisplay(
   if (!display) {
     return { label: userLabel ?? fallbackLabel, orgKind: 'unknown' };
   }
+  const instanceHost = display.instanceUrl ? safeHost(display.instanceUrl) : undefined;
   return {
-    label: userLabel ?? display.organizationName ?? display.username ?? fallbackLabel,
+    label: userLabel ?? instanceName(instanceHost) ?? display.organizationName ?? display.username ?? fallbackLabel,
+    organizationName: display.organizationName,
     orgKind: classifyOrgKind(display),
     username: display.username,
     orgId: display.id,
-    instanceHost: display.instanceUrl ? safeHost(display.instanceUrl) : undefined,
+    instanceHost,
   };
 }
 
@@ -94,8 +107,9 @@ export function sandboxName(host?: string): string | undefined {
 }
 
 /**
- * Sandboxes copy the production company name, so two sandboxes of one org
- * would both be called "Acme". Add the sandbox name (or org type) to tell them apart.
+ * Two orgs can still share a label, for example a label set by the user or two
+ * orgs without My Domain named after the same company. Add the sandbox name (or
+ * org type) to tell them apart.
  */
 export function distinguishLabels(
   baseline: OrgSideInfo,
@@ -125,6 +139,22 @@ export function buildOrgWarnings(baseline: OrgSideInfo, target: OrgSideInfo): st
         'source of truth, so "Only in target" and "Missing from target" read the other way round from what you may ' +
         'expect. If production should be the reference, swap baseline-auth-url and target-auth-url.',
     );
+  }
+
+  // A sandbox's My Domain is its production org's name plus "--sandbox", so
+  // orgs of one company share the part before "--". Scratch and Developer
+  // Edition orgs stand alone and are compared with anything.
+  const standalone: OrgKind[] = ['scratch', 'developer'];
+  const names = [instanceName(baseline.instanceHost), instanceName(target.instanceHost)];
+  if (names[0] && names[1] && !standalone.includes(baseline.orgKind) && !standalone.includes(target.orgKind)) {
+    const [baselineRoot, targetRoot] = names.map((name) => name!.toLowerCase().split('--')[0]);
+    if (baselineRoot !== targetRoot) {
+      warnings.push(
+        `Baseline ${names[0]} and target ${names[1]} belong to different production orgs (${baselineRoot} and ` +
+          `${targetRoot}). That is expected when comparing separate orgs, such as two regional orgs or a template ` +
+          'org; otherwise check that baseline-auth-url and target-auth-url hold the right secrets.',
+      );
+    }
   }
 
   const unknown = [

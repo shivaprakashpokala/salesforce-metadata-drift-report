@@ -149,6 +149,7 @@ function orgSection(baseline: OrgSideInfo, target: OrgSideInfo): string[] {
     '',
     ...table(['Org', 'Baseline (source of truth)', 'Target'], [
       row('Name', (side) => `**${escapeMd(side.label)}**`),
+      row('Company', (side) => side.organizationName && escapeMd(side.organizationName)),
       row('Org type', (side) => side.orgKind),
       row('Username', (side) => side.username && code(side.username)),
       row('Org ID', (side) => side.orgId && code(side.orgId)),

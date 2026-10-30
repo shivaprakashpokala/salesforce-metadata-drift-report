@@ -27,10 +27,10 @@ inputs:
     description: 'Salesforce API version, for example 64.0. Defaults to the latest version both orgs support.'
     required: false
   baseline-label:
-    description: 'Name for the baseline in the report. Defaults to the org name.'
+    description: 'Name for the baseline in the report. Defaults to the My Domain name of the org, such as acme.'
     required: false
   target-label:
-    description: 'Name for the target in the report. Defaults to the org name.'
+    description: 'Name for the target in the report. Defaults to the My Domain name of the org, such as acme--uat.'
     required: false
   upload-artifact:
     description: 'Upload the report files as a workflow artifact.'
