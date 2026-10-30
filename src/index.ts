@@ -5,11 +5,11 @@ import { normalizeMetadataTree } from './normalize.js';
 import { diffMetadataTrees } from './diff.js';
 import { writeJsonReport } from './report/json.js';
 import { writeHtmlReport } from './report/html.js';
-import { renderMarkdownReport, writeMarkdownReport } from './report/markdown.js';
+import { renderErrorSummary, renderMarkdownReport, writeMarkdownReport } from './report/markdown.js';
 import { writeJobSummary } from './report/summary.js';
 import { publishReportArtifact } from './artifact.js';
 import { parseInputs, readFixturePaths, validateInputs } from './inputs.js';
-import { buildOrgWarnings, type OrgSideInfo } from './org-kind.js';
+import { buildOrgWarnings, distinguishLabels, sameOrgError, type OrgSideInfo } from './org-kind.js';
 import { authUrlSecretParts, redactAuthUrls } from './redact.js';
 import { retrieveOrgs, FALLBACK_API_VERSION } from './retrieve.js';
 import { applyScope, createComparisonScope, standardObjectsWarning } from './scope.js';
@@ -59,13 +59,21 @@ async function resolveSides(inputs: ActionInputs, cleanup: string[]): Promise<Co
     workingDir: inputs.workingDir,
   });
   cleanup.push(...result.workDirs);
+  const mismatch = sameOrgError(result.baseline.info, result.target.info);
+  if (mismatch) throw new Error(mismatch);
+  distinguishLabels(result.baseline.info, result.target.info, { baseline: inputs.baselineLabel, target: inputs.targetLabel });
   return {
     baselinePath: result.baseline.path,
     targetPath: result.target.path,
     baseline: result.baseline.info,
     target: result.target.info,
     apiVersion: result.apiVersion,
-    retrievals: [result.baseline, result.target].map(({ side, retrievedAt, warnings }) => ({ side, retrievedAt, warnings })),
+    retrievals: [result.baseline, result.target].map(({ side, retrievedAt, warnings, cliWarnings }) => ({
+      side,
+      retrievedAt,
+      warnings,
+      cliWarnings,
+    })),
     fromOrgs: true,
   };
 }
@@ -90,10 +98,15 @@ export async function run(): Promise<void> {
     core.info(`Compared ${baselineTree.components.size} baseline and ${targetTree.components.size} target components.`);
 
     const retrievalWarnings = sides.retrievals.flatMap((item) => item.warnings.map((warning) => `${item.side} org: ${warning}`));
+    // CLI notices are shown but do not make the comparison incomplete.
+    const cliWarnings = sides.retrievals.flatMap(
+      (item) => (item.cliWarnings ?? []).map((warning) => `Salesforce CLI (${item.side} org): ${warning}`),
+    );
     const warnings = [
       ...(sides.fromOrgs ? buildOrgWarnings(sides.baseline, sides.target) : []),
       ...[standardObjectsWarning(scope)].filter((warning): warning is string => Boolean(warning)),
       ...retrievalWarnings,
+      ...cliWarnings,
     ];
     for (const warning of warnings) core.warning(warning);
 
@@ -162,8 +175,15 @@ export async function run(): Promise<void> {
     }
   } catch (error) {
     core.setOutput('comparison-status', 'error');
-    const message = error instanceof Error ? error.message : String(error);
-    core.setFailed(redactAuthUrls(message, authSecrets));
+    const message = redactAuthUrls(error instanceof Error ? error.message : String(error), authSecrets);
+    core.setFailed(message);
+    if (core.getInput('job-summary').trim().toLowerCase() !== 'false') {
+      try {
+        await writeJobSummary(renderErrorSummary(message, workflowRunUrl()));
+      } catch {
+        // The failure itself is already reported.
+      }
+    }
   } finally {
     for (const directory of cleanup) fs.rmSync(directory, { recursive: true, force: true });
     for (const parent of new Set(cleanup.map((directory) => path.dirname(directory)))) {

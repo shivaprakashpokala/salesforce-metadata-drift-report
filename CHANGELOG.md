@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Clearer reports. The HTML report opens with the verdict and the counts, then lists differences grouped by metadata type, with a one-line description of each change (for example "Length: 50 → 80").
+- The Job Summary is laid out as left-aligned tables in fixed sections: Orgs, Summary, Missing from target, Only in target, Changed (with one table of setting changes and collapsible Apex diffs), and What was compared. It reads in full on the workflow run page without downloading the HTML report.
+- Baseline and target logging in to the same org now stops the run with an error instead of a warning, since such a comparison can never show drift.
+- Orgs are named after their My Domain instance by default, such as `acme` and `acme--uat`, instead of the company name, which every sandbox copies from production. The company name is shown in the Orgs table. `baseline-label` and `target-label` still override the name.
+- A warning when a sandbox, scratch or Developer Edition org is the baseline and production is the target, which usually means the inputs are swapped.
+- A warning when baseline and target belong to different production orgs, judged by their My Domain names (`acme` and `globex--uat`). The comparison still runs, since comparing separate orgs can be intended. Scratch and Developer Edition orgs are not checked.
+- A failed login names the input and explains how to get a working SFDX auth URL. When the run stops before comparing, the Job Summary says why instead of staying empty.
+- Settings inside a component are shown in plain words, such as "Object permissions › Account › Allow edit", instead of XML paths. An entry that exists in only one org is shown once, marked as only in target or missing from target.
+- The HTML report has a light and a dark theme, follows the system setting, and works at phone width. URL-encoded names such as `Force%2Ecom - Free User` are shown decoded.
+
+### Fixed
+
+- Notices from the Salesforce CLI itself, such as deprecation warnings, are shown in the report but no longer make the comparison incomplete. Only problems the Metadata API reports for the retrieve do.
+- Profile and permission set `layoutAssignments` and `loginIpRanges` are matched by their content, so one added or reordered entry is reported as that entry instead of shifting every entry after it.
+- The action runs the Salesforce CLI with a home folder of its own and removes it afterwards. Logging out no longer removes a login the runner already had for the same user, which affected self-hosted runners and local runs.
+- A retrieve that exceeds the Metadata API limit of 10,000 files or 39 MB fails with an explanation and how to narrow the scope.
+
+### Documentation
+
+- README: describe the per-retrieve Metadata API limit.
+- CONTRIBUTING: test against two free scratch orgs with `npm run test:live`.
+
 ## [1.0.2] - 2026-10-09
 
 ### Documentation

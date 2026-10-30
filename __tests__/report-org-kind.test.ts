@@ -44,7 +44,7 @@ describe('drift report org kind surfacing', () => {
     expect(changed.fieldChanges.length).toBeGreaterThan(0);
 
     const html = renderHtmlReport(report);
-    expect(html).toContain('kind-badge');
+    expect(html).toContain('class="kind kind-');
     expect(html).toContain('Fixture Org A');
     expect(html).toContain('kind-sandbox');
 

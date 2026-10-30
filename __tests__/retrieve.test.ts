@@ -17,6 +17,7 @@ const TARGET_AUTH = 'force://PlatformCLI::targetRefreshToken@qa.sandbox.my.sales
 interface Call {
   args: string[];
   cwd?: string;
+  env?: NodeJS.ProcessEnv;
 }
 
 interface FakeOptions {
@@ -38,13 +39,13 @@ function sideOf(args: string[]): 'baseline' | 'target' {
 function fakeCli(options: FakeOptions = {}): { cli: CliExecutor; calls: Call[] } {
   const calls: Call[] = [];
   const cli: CliExecutor = {
-    async exec(_command, args) {
-      calls.push({ args });
+    async exec(_command, args, execOptions = {}) {
+      calls.push({ args, env: execOptions.env });
       if (options.sfMissing) throw new Error('spawn sf ENOENT');
       return 0;
     },
     async captureOutput(_command, args, execOptions = {}) {
-      const call = { args, cwd: execOptions.cwd };
+      const call = { args, cwd: execOptions.cwd, env: execOptions.env };
       calls.push(call);
       if (args[0] === 'org' && args[1] === 'login') {
         const side = sideOf(args);
@@ -192,6 +193,23 @@ describe('retrieveOrgs', () => {
     for (const file of files) expect(fs.existsSync(file)).toBe(false);
   });
 
+  it('runs the CLI in its own home folder and removes it, so existing logins are left alone', async () => {
+    const { cli, calls } = fakeCli();
+    await retrieveOrgs(request(), { cli });
+    const homes = new Set(calls.map((call) => call.env?.HOME));
+    expect(homes.size).toBe(1);
+    const [home] = homes;
+    expect(home).toBeTruthy();
+    expect(home).not.toBe(os.homedir());
+    expect(calls.every((call) => call.env?.USERPROFILE === home && call.env?.SF_USE_GENERIC_UNIX_KEYCHAIN === 'true')).toBe(true);
+    expect(calls.find((call) => call.args[1] === 'logout')).toBeDefined();
+    expect(fs.existsSync(home!)).toBe(false);
+
+    const failing = fakeCli({ loginFails: 'target' });
+    await expect(retrieveOrgs(request(), { cli: failing.cli })).rejects.toThrow();
+    expect(fs.existsSync(failing.calls[0].env!.HOME!)).toBe(false);
+  });
+
   it('fails with install instructions when the Salesforce CLI is missing', async () => {
     const { cli } = fakeCli({ sfMissing: true });
     await expect(retrieveOrgs(request(), { cli })).rejects.toThrow(/npm install --global @salesforce\/cli/);
@@ -218,12 +236,25 @@ describe('retrieveOrgs', () => {
     await expect(retrieveOrgs(request({ packageXmlPath: path.join(tmp, 'missing.xml') }), { cli })).rejects.toThrow(/does not exist/);
   });
 
+  it('explains a retrieve that exceeds the Metadata API limit', async () => {
+    const limit = { status: 1, result: { status: 'Failed', errorMessage: 'LIMIT_EXCEEDED: Too many files in retrieve call, limit is: 10000' } };
+    const { cli } = fakeCli({ retrieve: () => limit });
+    await expect(retrieveOrgs(request(), { cli })).rejects.toThrow(/10,000 files or 39 MB.*package-xml-path/);
+
+    const failing = fakeCli().cli;
+    const capture = failing.captureOutput.bind(failing);
+    failing.captureOutput = async (command, args, options) => (args[0] === 'project'
+      ? { exitCode: 1, stdout: JSON.stringify(limit), stderr: '' }
+      : capture(command, args, options));
+    await expect(retrieveOrgs(request(), { cli: failing })).rejects.toThrow(/10,000 files or 39 MB.*LIMIT_EXCEEDED/);
+  });
+
   it('rejects unfinished retrieves', async () => {
     const { cli } = fakeCli({ retrieve: () => ({ status: 0, result: { status: 'InProgress' } }) });
     await expect(retrieveOrgs(request(), { cli })).rejects.toThrow(/did not report success/);
   });
 
-  it('keeps retrieve warnings, single or listed, as redacted text', async () => {
+  it('keeps retrieve problems, single or listed, as redacted text, apart from CLI notices', async () => {
     const { cli } = fakeCli({
       retrieve: (side) => side === 'baseline'
         ? { ...success, result: { ...success.result, messages: { fileName: 'unpackaged/package.xml', problem: `Missing; ${BASELINE_AUTH}` } } }
@@ -231,7 +262,9 @@ describe('retrieveOrgs', () => {
     });
     const result = await retrieveOrgs(request(), { cli });
     expect(result.baseline.warnings).toEqual(['Missing; [REDACTED_AUTH_URL]']);
-    expect(result.target.warnings).toEqual(['A CLI warning', 'First', 'Second']);
+    expect(result.baseline.cliWarnings).toEqual([]);
+    expect(result.target.warnings).toEqual(['First', 'Second']);
+    expect(result.target.cliWarnings).toEqual(['A CLI warning']);
   });
 
   it('uses a fresh folder per run so old files cannot leak into a new comparison', async () => {

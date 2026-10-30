@@ -66,6 +66,8 @@ Left out unless you ask for them:
 
 If Salesforce cannot return part of the scope, or a retrieved file is not metadata, the outcome is **incomplete**. The report is still published, and the step fails.
 
+Each org is retrieved in one Metadata API call, which Salesforce caps at 10,000 files and 39 MB. A large org can pass that limit with the default scope, and the step fails with `error`. Narrow `metadata-types`, or list named members in a `package.xml`. Keep Profile and PermissionSet in the same comparison as the components they grant access to, because Salesforce only returns profile entries for components in the same retrieve.
+
 ## How drift is found
 
 ```mermaid
@@ -112,7 +114,7 @@ The quick start uses the defaults. Every input below is still supported.
 | `standard-objects` | Account, Contact, Lead, Opportunity, Case | Standard objects to include with CustomObject. |
 | `package-xml-path` | | Your `package.xml`, used instead of the two inputs above. Check out the repository first so the file is on the runner. |
 | `api-version` | latest version both orgs support | For example `64.0`. |
-| `baseline-label`, `target-label` | org name | Names shown in the report. |
+| `baseline-label`, `target-label` | My Domain name, such as `acme--uat` | Names shown in the report. Without My Domain, the company name is used. |
 | `artifact-name` | `salesforce-metadata-drift-report` | Must be unique within a workflow run. |
 | `artifact-retention-days` | `14` | Days to keep the artifact. |
 | `upload-artifact`, `job-summary` | `true` | Turn the artifact or Job Summary off. |

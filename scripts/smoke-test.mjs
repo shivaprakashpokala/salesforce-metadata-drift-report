@@ -19,6 +19,7 @@ const state = process.env.FAKE_SF_STATE;
 const value = (flag) => args[args.indexOf(flag) + 1];
 const side = (alias) => (alias.includes('baseline') ? 'baseline' : 'target');
 fs.appendFileSync(path.join(state, 'calls.log'), args.join(' ') + '\\n');
+fs.appendFileSync(path.join(state, 'homes.log'), process.env.HOME + '\\n');
 const print = (result) => process.stdout.write(JSON.stringify({ status: 0, result }));
 const orgs = JSON.parse(fs.readFileSync(path.join(state, 'orgs.json'), 'utf8'));
 const command = args.slice(0, 2).join(' ');
@@ -41,7 +42,8 @@ if (command === 'project retrieve') {
   const org = orgs[side(value('--target-org'))];
   fs.copyFileSync(value('--manifest'), path.join(state, side(value('--target-org')) + '-package.xml'));
   fs.cpSync(path.join(org.fixture, 'force-app'), path.join(process.cwd(), 'force-app'), { recursive: true });
-  print({ status: 'Succeeded', success: true, messages: org.message });
+  process.stdout.write(JSON.stringify({ status: 0, result: { status: 'Succeeded', success: true, messages: org.message },
+    warnings: org.cliWarning ? [org.cliWarning] : [] }));
   process.exit(0);
 }
 process.stderr.write('unexpected sf call: ' + args.join(' '));
@@ -119,22 +121,36 @@ try {
       },
     },
     {
+      name: 'org-cli-warning',
+      exitCode: 0,
+      outcome: 'drift',
+      orgs: {
+        baseline: { id: '00D000000000001AAA', username: 'ci@acme.com', instanceUrl: 'https://acme.my.salesforce.com',
+          apiVersion: '64.0', name: 'Acme', edition: 'Enterprise Edition', isSandbox: false,
+          fixture: path.join(root, 'fixtures/org-a'), cliWarning: 'The SFDX_ACCESS_TOKEN environment variable is deprecated.' },
+        target: { id: '00D000000000002AAA', username: 'ci@acme.com.uat', instanceUrl: 'https://acme--uat.sandbox.my.salesforce.com',
+          apiVersion: '64.0', name: 'Acme', edition: 'Enterprise Edition', isSandbox: true,
+          fixture: path.join(root, 'fixtures/org-b') },
+      },
+    },
+    {
       name: 'org-same-org',
       exitCode: 1,
-      outcome: 'incomplete',
+      outcome: undefined,
       orgs: {
         baseline: { id: '00D000000000001AAA', username: 'ci@acme.com', instanceUrl: 'https://acme.my.salesforce.com',
           apiVersion: '64.0', name: 'Acme', edition: 'Enterprise Edition', isSandbox: false,
           fixture: path.join(root, 'fixtures/org-a') },
         target: { id: '00D000000000001AAA', username: 'admin@acme.com', instanceUrl: 'https://acme.my.salesforce.com',
           apiVersion: '64.0', name: 'Acme', edition: 'Enterprise Edition', isSandbox: false,
-          fixture: path.join(root, 'fixtures/org-a'),
-          message: { fileName: 'unpackaged/package.xml', problem: 'Entity of type \'CustomObject\' named \'Lead\' cannot be found' } },
+          fixture: path.join(root, 'fixtures/org-a') },
       },
     },
   ];
 
   for (const { name, exitCode, outcome, orgs } of orgCases) {
+    const summaryFile = path.join(root, name + '-summary.md');
+    fs.writeFileSync(summaryFile, '');
     const state = path.join(root, name + '-state');
     fs.mkdirSync(state);
     fs.writeFileSync(path.join(state, 'orgs.json'), JSON.stringify(orgs));
@@ -146,33 +162,45 @@ try {
       'INPUT_WORKING-DIR': name + '-work',
       FAKE_SF_STATE: state,
       PATH: bin + path.delimiter + process.env.PATH,
+      'INPUT_JOB-SUMMARY': 'true',
+      GITHUB_STEP_SUMMARY: summaryFile,
     });
     assert.equal(result.status, exitCode, output);
+    const summary = fs.readFileSync(summaryFile, 'utf8');
     const logged = output.split('\n').filter((line) => !line.startsWith('::add-mask::')).join('\n');
     assert(!logged.includes('RefreshToken'), 'auth URL secret leaked into the log');
-    assert.equal(report.outcome, outcome);
+    assert.equal(report?.outcome, outcome);
 
     const calls = fs.readFileSync(path.join(state, 'calls.log'), 'utf8').trim().split('\n');
     assert.equal(calls.filter((call) => call.startsWith('org login')).length, 2);
     assert.equal(calls.filter((call) => call.startsWith('org logout')).length, 2);
     assert(!fs.existsSync(path.join(root, name + '-work')), 'working folder was not removed');
+    const homes = [...new Set(fs.readFileSync(path.join(state, 'homes.log'), 'utf8').trim().split('\n'))];
+    assert.equal(homes.length, 1, 'sf ran with more than one home folder');
+    assert.notEqual(homes[0], os.homedir(), 'sf ran in the user home folder');
+    assert(!fs.existsSync(homes[0]), 'the sf home folder was not removed');
 
     const manifest = fs.readFileSync(path.join(state, 'baseline-package.xml'), 'utf8');
     assert(manifest.includes('<members>Account</members>'));
     assert(manifest.includes('<name>Flow</name>'));
     assert(manifest.includes('<version>64.0</version>'));
-    assert(!report.warnings.some((warning) => /different kinds|production.*sandbox/i.test(warning)));
+    assert(!report?.warnings.some((warning) => /different kinds|production.*sandbox/i.test(warning)));
 
     if (name === 'org-drift') {
       assert.deepEqual(report.summary, DRIFT_SUMMARY);
       assert.equal(report.baseline.orgKind, 'production');
       assert.equal(report.target.orgKind, 'sandbox');
       assert.deepEqual(report.warnings, []);
+    } else if (name === 'org-cli-warning') {
+      assert.deepEqual(report.summary, DRIFT_SUMMARY);
+      assert.deepEqual(report.warnings,
+        ['Salesforce CLI (baseline org): The SFDX_ACCESS_TOKEN environment variable is deprecated.']);
     } else {
-      assert(report.warnings.some((warning) => warning.includes('same org')), report.warnings.join('\n'));
-      assert(report.warnings.includes("target org: Entity of type 'CustomObject' named 'Lead' cannot be found"),
-        report.warnings.join('\n'));
+      assert(output.includes('log in to the same org (Org ID 00D000000000001AAA'), output);
+      assert(summary.includes('# 🔴 Comparison could not run'), summary);
+      assert(summary.includes('log in to the same org'), summary);
     }
+    if (report) assert(summary.includes('## Summary'), 'the Job Summary was not written');
     console.log('Org comparison with a stub sf CLI: ' + name + ' passed');
   }
 } finally {

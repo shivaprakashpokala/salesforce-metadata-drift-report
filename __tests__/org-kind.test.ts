@@ -3,6 +3,9 @@ import {
   classifyOrgKind,
   orgSideFromDisplay,
   buildOrgWarnings,
+  distinguishLabels,
+  instanceName,
+  sameOrgError,
   type SfOrgDisplayFields,
 } from '../src/org-kind.js';
 
@@ -67,10 +70,21 @@ describe('orgSideFromDisplay', () => {
     );
 
     expect(side.orgKind).toBe('production');
+    // na1.salesforce.com has no My Domain, so the company name is used.
     expect(side.label).toBe('Acme Prod');
+    expect(side.organizationName).toBe('Acme Prod');
     expect(side.username).toBe('admin@example.com');
     expect(side.orgId).toBe('00Dxx0000000001');
     expect(side.instanceHost).toBe('na1.salesforce.com');
+  });
+
+  it('names the org after its My Domain instance', () => {
+    const side = orgSideFromDisplay(
+      { instanceUrl: 'https://acme--uat.sandbox.my.salesforce.com', organizationName: 'Acme', isSandbox: true, trialExpirationDate: null },
+      'fallback',
+    );
+    expect(side.label).toBe('acme--uat');
+    expect(side.organizationName).toBe('Acme');
   });
 
   it('uses user label when provided', () => {
@@ -90,6 +104,66 @@ describe('orgSideFromDisplay', () => {
   });
 });
 
+describe('instanceName', () => {
+  it.each([
+    ['acme.my.salesforce.com', 'acme'],
+    ['acme--uat.sandbox.my.salesforce.com', 'acme--uat'],
+    ['saas-customer-1226-dev-ed.scratch.my.salesforce.com', 'saas-customer-1226-dev-ed'],
+    ['agency.my.salesforce.mil', 'agency'],
+    ['na1.salesforce.com', undefined],
+    [undefined, undefined],
+  ])('%s → %s', (host, name) => {
+    expect(instanceName(host)).toBe(name);
+  });
+});
+
+describe('sameOrgError', () => {
+  it('stops when both sides are the same org, matching 15 and 18 character IDs', () => {
+    const message = sameOrgError(
+      { label: 'A', orgKind: 'sandbox', orgId: '00D000000000001AAA', username: 'ci@acme.com.uat' },
+      { label: 'B', orgKind: 'sandbox', orgId: '00D000000000001', username: 'admin@acme.com.uat' },
+    );
+    expect(message).toContain('log in to the same org (Org ID 00D000000000001AAA, users ci@acme.com.uat and admin@acme.com.uat)');
+  });
+
+  it('allows different orgs', () => {
+    expect(sameOrgError(
+      { label: 'A', orgKind: 'sandbox', orgId: '00D000000000001AAA' },
+      { label: 'B', orgKind: 'sandbox', orgId: '00D000000000002AAA' },
+    )).toBeUndefined();
+  });
+});
+
+describe('distinguishLabels', () => {
+  it('adds the sandbox name when two sandboxes share the company name', () => {
+    const baseline = { label: 'Acme', orgKind: 'sandbox' as const, instanceHost: 'acme--uat.sandbox.my.salesforce.com' };
+    const target = { label: 'Acme', orgKind: 'sandbox' as const, instanceHost: 'acme--qa.sandbox.my.salesforce.com' };
+    distinguishLabels(baseline, target);
+    expect([baseline.label, target.label]).toEqual(['Acme (uat)', 'Acme (qa)']);
+  });
+
+  it('uses the org type for production against a sandbox and keeps labels the user set', () => {
+    const baseline = { label: 'Acme', orgKind: 'production' as const, instanceHost: 'acme.my.salesforce.com' };
+    const target = { label: 'Acme', orgKind: 'sandbox' as const, instanceHost: 'acme--uat.sandbox.my.salesforce.com' };
+    distinguishLabels(baseline, target, { baseline: 'Acme' });
+    expect([baseline.label, target.label]).toEqual(['Acme', 'Acme (uat)']);
+  });
+
+  it('falls back to baseline and target when nothing else tells them apart', () => {
+    const baseline = { label: 'Acme', orgKind: 'unknown' as const };
+    const target = { label: 'Acme', orgKind: 'unknown' as const };
+    distinguishLabels(baseline, target);
+    expect([baseline.label, target.label]).toEqual(['Acme (baseline)', 'Acme (target)']);
+  });
+
+  it('leaves different labels alone', () => {
+    const baseline = { label: 'Production', orgKind: 'production' as const };
+    const target = { label: 'QA', orgKind: 'sandbox' as const };
+    distinguishLabels(baseline, target);
+    expect([baseline.label, target.label]).toEqual(['Production', 'QA']);
+  });
+});
+
 describe('buildOrgWarnings', () => {
   it('does not warn about production against a sandbox', () => {
     expect(buildOrgWarnings(
@@ -98,13 +172,42 @@ describe('buildOrgWarnings', () => {
     )).toEqual([]);
   });
 
-  it('warns when both sides are the same org', () => {
-    const warnings = buildOrgWarnings(
-      { label: 'A', orgKind: 'sandbox', orgId: '00D000000000001AAA' },
-      { label: 'B', orgKind: 'sandbox', orgId: '00D000000000001' },
-    );
+  it('does not warn about two sandboxes of the same production org', () => {
+    expect(buildOrgWarnings(
+      { label: 'Acme', orgKind: 'sandbox', orgId: '00D000000000001AAA' },
+      { label: 'Acme', orgKind: 'sandbox', orgId: '00D000000000002AAA' },
+    )).toEqual([]);
+  });
+
+  it('warns when a sandbox is the baseline for production', () => {
+    const warnings = buildOrgWarnings({ label: 'QA', orgKind: 'sandbox' }, { label: 'Production', orgKind: 'production' });
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain('same org');
+    expect(warnings[0]).toContain('swap baseline-auth-url and target-auth-url');
+  });
+
+  describe('orgs from different production orgs', () => {
+    const org = (orgKind: 'production' | 'sandbox' | 'scratch' | 'developer', instanceHost: string) =>
+      ({ label: instanceHost, orgKind, instanceHost });
+
+    it('does not warn for production and its own sandbox, or two sandboxes of it', () => {
+      expect(buildOrgWarnings(org('production', 'acme.my.salesforce.com'), org('sandbox', 'acme--uat.sandbox.my.salesforce.com'))).toEqual([]);
+      expect(buildOrgWarnings(org('sandbox', 'ACME--qa.sandbox.my.salesforce.com'), org('sandbox', 'acme--uat.sandbox.my.salesforce.com'))).toEqual([]);
+    });
+
+    it('warns when the orgs belong to different production orgs', () => {
+      const warnings = buildOrgWarnings(org('production', 'acme.my.salesforce.com'), org('sandbox', 'globex--uat.sandbox.my.salesforce.com'));
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('Baseline acme and target globex--uat belong to different production orgs (acme and globex)');
+    });
+
+    it('does not warn for scratch or Developer Edition orgs', () => {
+      expect(buildOrgWarnings(org('scratch', 'one-dev-ed.scratch.my.salesforce.com'), org('scratch', 'two-dev-ed.scratch.my.salesforce.com'))).toEqual([]);
+      expect(buildOrgWarnings(org('production', 'acme.my.salesforce.com'), org('developer', 'mine-dev-ed.develop.my.salesforce.com'))).toEqual([]);
+    });
+
+    it('does not warn when an org has no My Domain', () => {
+      expect(buildOrgWarnings(org('production', 'na1.salesforce.com'), org('sandbox', 'globex--uat.sandbox.my.salesforce.com'))).toEqual([]);
+    });
   });
 
   it('names the side whose org type is unknown', () => {

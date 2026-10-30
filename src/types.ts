@@ -29,6 +29,7 @@ export interface RetrievalRecord {
   side: string;
   retrievedAt: string;
   warnings: string[];
+  cliWarnings?: string[];
 }
 
 export interface DriftReport {
