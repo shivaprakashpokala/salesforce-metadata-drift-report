@@ -2,15 +2,48 @@
 
 [![CI](https://github.com/shivaprakashpokala/salesforce-metadata-drift-report/actions/workflows/ci.yml/badge.svg)](https://github.com/shivaprakashpokala/salesforce-metadata-drift-report/actions/workflows/ci.yml)
 
-Compare two Salesforce orgs and publish a drift report.
+Find out exactly how a sandbox differs from production, on a schedule, without clicking through Setup.
 
-Orgs drift when metadata is edited by hand, deployed manually, or changed outside CI — across production, staging, a support org, or a developer sandbox. Comparing Setup by hand does not show those metadata differences reliably. This action logs into both orgs with SFDX auth URLs, retrieves the same metadata, and reports what was added, what is missing, and what changed. Drift alone does not fail the job.
+Orgs drift apart when someone edits a field in Setup, deploys by hand, or fixes something directly in production. This action compares the metadata of two orgs and publishes a clear report on the workflow run page: what is missing, what was added, and what changed, down to the setting.
+
+**Why teams use it**
+
+- **Catch drift before a release.** Know whether your sandbox still matches production before you build or deploy on top of it.
+- **See manual changes.** Edits made in Setup to compared metadata show up like any other change, with the before and after value.
+- **Read it in one place.** The report appears in the Job Summary as plain tables, with Apex changes shown as a diff. No hosting or extra tools.
+- **Automate the response.** Outputs such as `has-drift` let a workflow fail, notify, or open an issue when drift appears.
+
+## What the report looks like
+
+> # 🟠 Drift found
+> 44 of 417 components differ between **acme** and **acme--uat**.
+>
+> | Result | Components |
+> | :--- | :--- |
+> | ➖ Missing from target | **1** |
+> | ➕ Only in target | **2** |
+> | ✏️ Changed | **41** |
+> | ✅ Unchanged | 373 |
+>
+> | Component | Setting | Baseline | Target |
+> | :--- | :--- | :--- | :--- |
+> | `Account.Status__c` | Length | `50` | `80` |
+> | `Sales_User` | Object permissions › Invoice\_\_c › Allow edit | `false` | `true` |
+
+The full report also lists the orgs compared, every missing, added and changed component, and what was in scope. Markdown, HTML and JSON copies are saved as a workflow artifact.
 
 ## Quick start
 
-You need the Salesforce CLI on the runner (the workflow below installs it) and two repository secrets, each holding one org's SFDX auth URL.
+**1. Store an auth URL for each org as a repository secret.**
 
-Save this as `.github/workflows/metadata-drift.yml`:
+```bash
+sf org login web --alias prod
+sf org auth show-sfdx-auth-url --target-org prod --json
+```
+
+Copy `result.sfdxAuthUrl` into a secret such as `SFDX_PROD_AUTH_URL`. For a sandbox, add `--instance-url https://test.salesforce.com` to the login. Use an integration user with **API Enabled**, **View Setup and Configuration** and **Modify Metadata Through Metadata API Functions** (the Metadata API needs it to retrieve, even though nothing is deployed).
+
+**2. Add a workflow,** for example `.github/workflows/metadata-drift.yml`:
 
 ```yaml
 name: Metadata drift
@@ -18,7 +51,7 @@ name: Metadata drift
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 6 * * 1'
+    - cron: '0 6 * * 1'   # Mondays 06:00 UTC
 
 permissions:
   contents: read
@@ -27,99 +60,78 @@ jobs:
   drift-report:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Salesforce CLI
-        run: npm install --global @salesforce/cli
+      - run: npm install --global @salesforce/cli
 
-      - name: Compare production with QA
+      - uses: shivaprakashpokala/salesforce-metadata-drift-report@v1
         id: drift
-        uses: shivaprakashpokala/salesforce-metadata-drift-report@v1
         with:
-          baseline-auth-url: ${{ secrets.SFDX_PROD_AUTH_URL }}
-          target-auth-url: ${{ secrets.SFDX_QA_AUTH_URL }}
+          baseline-auth-url: ${{ secrets.SFDX_PROD_AUTH_URL }}   # source of truth
+          target-auth-url: ${{ secrets.SFDX_QA_AUTH_URL }}       # org to check
 
-      - name: Fail on drift
-        if: steps.drift.outputs.has-drift == 'true'
+      # Optional: fail the run when anything differs
+      - if: steps.drift.outputs.has-drift == 'true'
         run: exit 1
 ```
 
-Leave out the last step if drift should only be reported. Copy-paste workflows are in the repo: [one org](examples/org-vs-sandbox.yml) and [several orgs against one baseline](examples/sandbox-matrix.yml).
+Ready-made workflows: [production vs one sandbox](examples/org-vs-sandbox.yml) and [production vs several sandboxes](examples/sandbox-matrix.yml).
 
-GitHub-hosted runners can run this action. A self-hosted runner needs Node.js 24.
+## What is compared
 
-## What gets compared
+By default:
 
-Metadata components, not records and not Setup screens.
+- **Metadata types:** CustomObject, Layout, Flow, Profile, PermissionSet, FlexiPage, ApexClass, ApexTrigger, CustomApplication, RemoteSiteSetting
+- **Objects:** every custom object with its fields, validation rules and record types, plus Account, Contact, Lead, Opportunity and Case
 
-Default scope:
+Add other types with `metadata-types`, or pass your own `package.xml` for full control. Differences in XML formatting or element order are ignored, so only real changes are reported.
 
-- **Types:** CustomObject, Layout, Flow, Profile, PermissionSet, FlexiPage, ApexClass, ApexTrigger, CustomApplication, RemoteSiteSetting
-- **Custom objects:** every custom object, including its fields, validation rules, and record types
-- **Standard objects:** Account, Contact, Lead, Opportunity, and Case, with their custom fields
+Not compared: data records, users and their assignments, managed-package components (unless listed in a `package.xml`), and any type outside the scope.
 
-Other types, such as ApexPage, CustomTab, LightningComponentBundle, NamedCredential, and StaticResource, work the same way when you add them to `metadata-types`. A type that cannot be retrieved with a wildcard needs a `package.xml`.
+## Reading the result
 
-Left out unless you ask for them:
+| Outcome | Meaning | Step |
+| :--- | :--- | :--- |
+| `drift` | Something differs | Passes (add a step to fail if you want) |
+| `no-drift` | Everything in scope matches | Passes |
+| `incomplete` | Part of the scope could not be retrieved or recognized, so a clean result cannot be confirmed. The report lists the reason. | Fails |
+| `error` | The comparison could not run, for example an expired auth URL. The Job Summary explains how to fix it. | Fails |
 
-- Managed-package components. Wildcard retrieve skips them. List them in `package.xml` if you need them.
-- Users, Chatter, reports, and any type you did not retrieve.
-- Profile and permission set entries for objects, fields, classes, pages, tabs, apps, or record types that are not in the same scope.
+The action also checks the inputs make sense. It stops if both secrets point to the same org, and warns if production is the target instead of the baseline or if the two orgs belong to different companies.
 
-If Salesforce cannot return part of the scope, or a retrieved file is not metadata, the outcome is **incomplete**. The report is still published, and the step fails.
+## Inputs
 
-Each org is retrieved in one Metadata API call, which Salesforce caps at 10,000 files and 39 MB. A large org can pass that limit with the default scope, and the step fails with `error`. Narrow `metadata-types`, or list named members in a `package.xml`. Keep Profile and PermissionSet in the same comparison as the components they grant access to, because Salesforce only returns profile entries for components in the same retrieve.
-
-## How drift is found
-
-```mermaid
-flowchart TD
-    A["Auth URLs"] --> B["Retrieve baseline and target"]
-    B --> C["Normalize metadata"]
-    C --> D["Compare components"]
-    D --> E["Classify added, missing, changed"]
-    E --> F["drift / no-drift / incomplete"]
-    F --> G["Job Summary and artifact"]
-```
-
-- **Retrieve** the same scope from both orgs, from `metadata-types` and `standard-objects`, or from your `package.xml`.
-- **Normalize** XML so element order, whitespace, and sorted profile entries are not drift.
-- **Compare** by type and name: added in the target, missing from the target, changed, or unchanged.
-- **Outcome:** `drift` when something differs, `no-drift` when it matches, `incomplete` when part of the scope could not be retrieved or identified. A bad auth URL or a failed retrieve is `error`, with no report.
-
-## Auth URL
-
-```bash
-sf org login web --alias prod
-sf org auth show-sfdx-auth-url --target-org prod --json
-```
-
-Copy `result.sfdxAuthUrl` into a secret such as `SFDX_PROD_AUTH_URL`. For a sandbox, log in with `--instance-url https://test.salesforce.com`. Never commit an auth URL.
-
-Use an integration user with **API Enabled**, **View Setup and Configuration**, and **Modify Metadata Through Metadata API Functions**. Retrieve needs that last permission even though this action does not deploy.
-
-## What you get
-
-- Artifact `salesforce-metadata-drift-report` with the report as Markdown, HTML, and JSON.
-- Job Summary with the verdict, added, missing, and changed components, and a line diff for Apex. It shows each org's username and Org ID.
-- Outputs: `comparison-status` (`drift`, `no-drift`, `incomplete`, or `error`), `has-drift`, `added-count`, `removed-count`, `changed-count`, `unchanged-count`, the three report paths, and `artifact-id`.
-
-Removed means present in the baseline and missing from the target.
-
-## Optional inputs
-
-The quick start uses the defaults. Every input below is still supported.
+Only the two auth URLs are required.
 
 | Input | Default | Description |
-|---|---|---|
-| `metadata-types` | CustomObject, Layout, Flow, Profile, PermissionSet, FlexiPage, ApexClass, ApexTrigger, CustomApplication, RemoteSiteSetting | Types to compare. Fields, validation rules, and record types come with CustomObject. |
+| :--- | :--- | :--- |
+| `baseline-auth-url` | required | Auth URL of the source of truth, usually production. |
+| `target-auth-url` | required | Auth URL of the org to check, usually a sandbox. |
+| `metadata-types` | see above | Comma-separated types to compare. |
 | `standard-objects` | Account, Contact, Lead, Opportunity, Case | Standard objects to include with CustomObject. |
-| `package-xml-path` | | Your `package.xml`, used instead of the two inputs above. Check out the repository first so the file is on the runner. |
-| `api-version` | latest version both orgs support | For example `64.0`. |
-| `baseline-label`, `target-label` | My Domain name, such as `acme--uat` | Names shown in the report. Without My Domain, the company name is used. |
-| `artifact-name` | `salesforce-metadata-drift-report` | Must be unique within a workflow run. |
+| `package-xml-path` | | Your own `package.xml`, used instead of the two inputs above. Check out the repository first. |
+| `api-version` | latest both orgs support | For example `64.0`. |
+| `baseline-label`, `target-label` | My Domain name, such as `acme--uat` | Names shown in the report. |
+| `job-summary`, `upload-artifact` | `true` | Turn the Job Summary or the artifact off. |
+| `artifact-name` | `salesforce-metadata-drift-report` | Set a unique name per job when comparing several orgs in one run. |
 | `artifact-retention-days` | `14` | Days to keep the artifact. |
-| `upload-artifact`, `job-summary` | `true` | Turn the artifact or Job Summary off. |
 | `output-dir` | `drift-report` | Folder for the report files on the runner. |
-| `working-dir` | `.sf-drift-work` | Scratch folder for the retrieve. Removed after the run. |
+| `working-dir` | `.sf-drift-work` | Temporary folder for retrieved metadata, removed after the run. |
+
+## Outputs
+
+| Output | Description |
+| :--- | :--- |
+| `comparison-status` | `drift`, `no-drift`, `incomplete` or `error` |
+| `has-drift` | `true` when anything differs |
+| `added-count`, `removed-count`, `changed-count`, `unchanged-count` | Component counts. Removed means in the baseline but missing from the target. |
+| `report-md-path`, `report-html-path`, `report-json-path` | Paths to the report files |
+| `artifact-id` | ID of the uploaded artifact |
+
+## Good to know
+
+- **Security.** Auth URLs are masked in logs and never written to the report. The Salesforce CLI runs with its own temporary home folder, so the action leaves no logins behind and does not touch logins already on a self-hosted runner.
+- **Size limit.** Salesforce returns at most 10,000 files or 39 MB per retrieve. For a very large org, narrow `metadata-types` or list named members in a `package.xml`.
+- **Profiles and permission sets** only include entries for objects, classes and other components in the same comparison, so keep them in scope together.
+- **Runners.** Works on GitHub-hosted runners. Self-hosted runners need Node.js 24.
 
 ## License
 
