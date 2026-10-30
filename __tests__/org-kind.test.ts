@@ -3,6 +3,8 @@ import {
   classifyOrgKind,
   orgSideFromDisplay,
   buildOrgWarnings,
+  distinguishLabels,
+  sameOrgError,
   type SfOrgDisplayFields,
 } from '../src/org-kind.js';
 
@@ -90,6 +92,53 @@ describe('orgSideFromDisplay', () => {
   });
 });
 
+describe('sameOrgError', () => {
+  it('stops when both sides are the same org, matching 15 and 18 character IDs', () => {
+    const message = sameOrgError(
+      { label: 'A', orgKind: 'sandbox', orgId: '00D000000000001AAA', username: 'ci@acme.com.uat' },
+      { label: 'B', orgKind: 'sandbox', orgId: '00D000000000001', username: 'admin@acme.com.uat' },
+    );
+    expect(message).toContain('log in to the same org (Org ID 00D000000000001AAA, users ci@acme.com.uat and admin@acme.com.uat)');
+  });
+
+  it('allows different orgs', () => {
+    expect(sameOrgError(
+      { label: 'A', orgKind: 'sandbox', orgId: '00D000000000001AAA' },
+      { label: 'B', orgKind: 'sandbox', orgId: '00D000000000002AAA' },
+    )).toBeUndefined();
+  });
+});
+
+describe('distinguishLabels', () => {
+  it('adds the sandbox name when two sandboxes share the company name', () => {
+    const baseline = { label: 'Acme', orgKind: 'sandbox' as const, instanceHost: 'acme--uat.sandbox.my.salesforce.com' };
+    const target = { label: 'Acme', orgKind: 'sandbox' as const, instanceHost: 'acme--qa.sandbox.my.salesforce.com' };
+    distinguishLabels(baseline, target);
+    expect([baseline.label, target.label]).toEqual(['Acme (uat)', 'Acme (qa)']);
+  });
+
+  it('uses the org type for production against a sandbox and keeps labels the user set', () => {
+    const baseline = { label: 'Acme', orgKind: 'production' as const, instanceHost: 'acme.my.salesforce.com' };
+    const target = { label: 'Acme', orgKind: 'sandbox' as const, instanceHost: 'acme--uat.sandbox.my.salesforce.com' };
+    distinguishLabels(baseline, target, { baseline: 'Acme' });
+    expect([baseline.label, target.label]).toEqual(['Acme', 'Acme (uat)']);
+  });
+
+  it('falls back to baseline and target when nothing else tells them apart', () => {
+    const baseline = { label: 'Acme', orgKind: 'unknown' as const };
+    const target = { label: 'Acme', orgKind: 'unknown' as const };
+    distinguishLabels(baseline, target);
+    expect([baseline.label, target.label]).toEqual(['Acme (baseline)', 'Acme (target)']);
+  });
+
+  it('leaves different labels alone', () => {
+    const baseline = { label: 'Production', orgKind: 'production' as const };
+    const target = { label: 'QA', orgKind: 'sandbox' as const };
+    distinguishLabels(baseline, target);
+    expect([baseline.label, target.label]).toEqual(['Production', 'QA']);
+  });
+});
+
 describe('buildOrgWarnings', () => {
   it('does not warn about production against a sandbox', () => {
     expect(buildOrgWarnings(
@@ -98,13 +147,17 @@ describe('buildOrgWarnings', () => {
     )).toEqual([]);
   });
 
-  it('warns when both sides are the same org', () => {
-    const warnings = buildOrgWarnings(
-      { label: 'A', orgKind: 'sandbox', orgId: '00D000000000001AAA' },
-      { label: 'B', orgKind: 'sandbox', orgId: '00D000000000001' },
-    );
+  it('does not warn about two sandboxes of the same production org', () => {
+    expect(buildOrgWarnings(
+      { label: 'Acme', orgKind: 'sandbox', orgId: '00D000000000001AAA' },
+      { label: 'Acme', orgKind: 'sandbox', orgId: '00D000000000002AAA' },
+    )).toEqual([]);
+  });
+
+  it('warns when a sandbox is the baseline for production', () => {
+    const warnings = buildOrgWarnings({ label: 'QA', orgKind: 'sandbox' }, { label: 'Production', orgKind: 'production' });
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain('same org');
+    expect(warnings[0]).toContain('swap baseline-auth-url and target-auth-url');
   });
 
   it('names the side whose org type is unknown', () => {

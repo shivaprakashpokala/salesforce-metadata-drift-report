@@ -61,7 +61,7 @@ function table(header: string[], rows: string[][], limit = MAX_LIST_ROWS): strin
   const more = rows.length > limit ? [`_${rows.length - limit} more rows are in the JSON report._`, ''] : [];
   return [
     `| ${header.join(' | ')} |`,
-    `| ${header.map(() => '---').join(' | ')} |`,
+    `| ${header.map(() => ':---').join(' | ')} |`,
     ...rows.slice(0, limit).map((cells) => `| ${cells.join(' | ')} |`),
     '',
     ...more,
@@ -147,7 +147,7 @@ function orgSection(baseline: OrgSideInfo, target: OrgSideInfo): string[] {
   return [
     '## Orgs',
     '',
-    ...table(['', 'Baseline (source of truth)', 'Target'], [
+    ...table(['Org', 'Baseline (source of truth)', 'Target'], [
       row('Name', (side) => `**${escapeMd(side.label)}**`),
       row('Org type', (side) => side.orgKind),
       row('Username', (side) => side.username && code(side.username)),
@@ -200,6 +200,7 @@ export function renderMarkdownReport(report: DriftReport): string {
   }
 
   lines.push(
+    ...orgSection(report.baseline, report.target),
     '## Summary',
     '',
     ...table(['Result', 'Components'], [
@@ -212,11 +213,26 @@ export function renderMarkdownReport(report: DriftReport): string {
     ...listSection(report, 'removed'),
     ...listSection(report, 'added'),
     ...changedSection(report),
-    ...orgSection(report.baseline, report.target),
     ...scopeSection(report),
     `<sub>${summary.unchanged} unchanged components are not listed. The JSON report in the workflow artifact has every component.</sub>`,
   );
   return `${lines.join('\n').trimEnd()}\n`;
+}
+
+/** Job Summary for a run that stopped before it could compare, such as a bad input or a failed login. */
+export function renderErrorSummary(message: string, runUrl?: string): string {
+  return [
+    '<sub>SALESFORCE METADATA DRIFT REPORT</sub>',
+    '',
+    `# ${STATUS_ICONS.incomplete} Comparison could not run`,
+    '',
+    'No report was produced. Fix the problem below and run the workflow again.',
+    '',
+    '> [!CAUTION]',
+    `> ${escapeMd(message)}`,
+    '',
+    ...(runUrl ? [`[Workflow run](${runUrl})`, ''] : []),
+  ].join('\n');
 }
 
 export function writeMarkdownReport(report: DriftReport, outputDir: string): string {

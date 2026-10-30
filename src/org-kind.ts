@@ -80,13 +80,50 @@ export function orgSideFromDisplay(
   };
 }
 
+/** An error message when both inputs log in to the same org, which can never show drift. */
+export function sameOrgError(baseline: OrgSideInfo, target: OrgSideInfo): string | undefined {
+  if (!baseline.orgId || !target.orgId || baseline.orgId.slice(0, 15) !== target.orgId.slice(0, 15)) return undefined;
+  return `baseline-auth-url and target-auth-url log in to the same org (Org ID ${baseline.orgId}, ` +
+    `users ${baseline.username ?? 'unknown'} and ${target.username ?? 'unknown'}). Comparing an org with itself ` +
+    'can never show drift. Point each input at a different org, for example production and a sandbox.';
+}
+
+/** "acme--uat.sandbox.my.salesforce.com" → "uat". */
+export function sandboxName(host?: string): string | undefined {
+  return /^[^.]+--([^.]+)\.sandbox\.my\.salesforce\.com$/.exec(host ?? '')?.[1];
+}
+
+/**
+ * Sandboxes copy the production company name, so two sandboxes of one org
+ * would both be called "Acme". Add the sandbox name (or org type) to tell them apart.
+ */
+export function distinguishLabels(
+  baseline: OrgSideInfo,
+  target: OrgSideInfo,
+  userLabels: { baseline?: string; target?: string } = {},
+): void {
+  if (baseline.label !== target.label) return;
+  const sides = [[baseline, userLabels.baseline], [target, userLabels.target]] as const;
+  for (const [side, userLabel] of sides) {
+    if (userLabel) continue;
+    const detail = sandboxName(side.instanceHost) ?? (side.orgKind !== 'unknown' ? side.orgKind : side.username);
+    if (detail) side.label = `${side.label} (${detail})`;
+  }
+  if (baseline.label === target.label) {
+    if (!userLabels.baseline) baseline.label = `${baseline.label} (baseline)`;
+    if (!userLabels.target) target.label = `${target.label} (target)`;
+  }
+}
+
 export function buildOrgWarnings(baseline: OrgSideInfo, target: OrgSideInfo): string[] {
   const warnings: string[] = [];
 
-  if (baseline.orgId && target.orgId && baseline.orgId.slice(0, 15) === target.orgId.slice(0, 15)) {
+  const nonProduction: OrgKind[] = ['sandbox', 'scratch', 'developer'];
+  if (target.orgKind === 'production' && nonProduction.includes(baseline.orgKind)) {
     warnings.push(
-      'Baseline and target are the same org (same Org ID). Check that baseline-auth-url and ' +
-        'target-auth-url point to different orgs.',
+      `The baseline is a ${baseline.orgKind} org and the target is production. The baseline is treated as the ` +
+        'source of truth, so "Only in target" and "Missing from target" read the other way round from what you may ' +
+        'expect. If production should be the reference, swap baseline-auth-url and target-auth-url.',
     );
   }
 

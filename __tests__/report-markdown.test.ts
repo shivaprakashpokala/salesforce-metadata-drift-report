@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { normalizeMetadataTree } from '../src/normalize.js';
 import { diffMetadataTrees } from '../src/diff.js';
-import { renderMarkdownReport, writeMarkdownReport } from '../src/report/markdown.js';
+import { renderErrorSummary, renderMarkdownReport, writeMarkdownReport } from '../src/report/markdown.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ORG_A = path.join(__dirname, 'fixtures', 'org-a');
@@ -35,7 +35,7 @@ describe('renderMarkdownReport', () => {
 
   it('lists each kind of difference in its own table section', async () => {
     const md = renderMarkdownReport(await fixtureReport());
-    const sections = ['## Summary', '## ➖ Missing from target (1)', '## ➕ Only in target (2)', '## ✏️ Changed (3)', '## Orgs'];
+    const sections = ['## Orgs', '## Summary', '## ➖ Missing from target (1)', '## ➕ Only in target (2)', '## ✏️ Changed (3)'];
     const positions = sections.map((heading) => md.indexOf(heading));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
@@ -67,6 +67,19 @@ describe('renderMarkdownReport', () => {
     const md = renderMarkdownReport(report);
     expect(md).toContain('> [!WARNING]\n> - Baseline and target are the same org (same Org ID).');
     expect(md.indexOf('[!WARNING]')).toBeLessThan(md.indexOf('## Summary'));
+  });
+
+  it('left-aligns every table', async () => {
+    const md = renderMarkdownReport(await fixtureReport());
+    const separators = md.split('\n').filter((line) => /^\| *:?-+/.test(line));
+    expect(separators.length).toBeGreaterThan(3);
+    for (const line of separators) expect(line).toMatch(/^\|( :--- \|)+$/);
+  });
+
+  it('explains a run that stopped before comparing', () => {
+    const md = renderErrorSummary('baseline-auth-url and target-auth-url are identical.', 'https://github.com/example/repo/actions/runs/1');
+    expect(md).toContain('# 🔴 Comparison could not run');
+    expect(md).toContain('> [!CAUTION]\n> baseline-auth-url and target-auth-url are identical.');
   });
 
   it('writes metadata-drift-report.md', async () => {

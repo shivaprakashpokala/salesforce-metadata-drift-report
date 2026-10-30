@@ -99603,6 +99603,15 @@ function renderHtmlReport(report) {
     <p class="route">Baseline <strong>${escapeHtml(report.baseline.label)}</strong> → target <strong>${escapeHtml(report.target.label)}</strong> · ${escapeHtml(formatTimestamp(report.generatedAt))}${runLink}</p>
   </div>
 
+  ${report.warnings.length ? `<div class="warnings" role="note"><strong>Warnings</strong><ul>${report.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}</ul></div>` : ''}
+
+  <h2>Orgs</h2>
+  <table class="orgs">
+    <thead><tr><th>Baseline (source of truth)</th><th>Target</th></tr></thead>
+    <tbody><tr>${orgCell(report.baseline)}${orgCell(report.target)}</tr></tbody>
+  </table>
+
+  <h2>Summary</h2>
   <div class="stats">
     ${stat('Only in target', summary.added, 'added')}
     ${stat('Missing from target', summary.removed, 'removed')}
@@ -99610,16 +99619,9 @@ function renderHtmlReport(report) {
     ${stat('Unchanged', summary.unchanged, 'unchanged')}
   </div>
 
-  ${report.warnings.length ? `<div class="warnings" role="note"><strong>Warnings</strong><ul>${report.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}</ul></div>` : ''}
-
   <h2>Differences</h2>
   ${types.length ? types.map(renderType).join('') : '<p class="empty">Nothing differs. The full list of compared components is in the JSON report.</p>'}
 
-  <h2>Orgs</h2>
-  <table class="orgs">
-    <thead><tr><th>Baseline (source of truth)</th><th>Target</th></tr></thead>
-    <tbody><tr>${orgCell(report.baseline)}${orgCell(report.target)}</tr></tbody>
-  </table>
   ${scope ? `<details class="scope"><summary>What was compared</summary><ul>${scopeList}</ul></details>` : ''}
   <p class="note">${summary.unchanged} unchanged components are not listed. The JSON report has every component.</p>
 </main>
@@ -99679,7 +99681,7 @@ function table(header, rows, limit = MAX_LIST_ROWS) {
     const more = rows.length > limit ? [`_${rows.length - limit} more rows are in the JSON report._`, ''] : [];
     return [
         `| ${header.join(' | ')} |`,
-        `| ${header.map(() => '---').join(' | ')} |`,
+        `| ${header.map(() => ':---').join(' | ')} |`,
         ...rows.slice(0, limit).map((cells) => `| ${cells.join(' | ')} |`),
         '',
         ...more,
@@ -99755,7 +99757,7 @@ function orgSection(baseline, target) {
     return [
         '## Orgs',
         '',
-        ...table(['', 'Baseline (source of truth)', 'Target'], [
+        ...table(['Org', 'Baseline (source of truth)', 'Target'], [
             row('Name', (side) => `**${escapeMd(side.label)}**`),
             row('Org type', (side) => side.orgKind),
             row('Username', (side) => side.username && code(side.username)),
@@ -99803,14 +99805,29 @@ function renderMarkdownReport(report) {
     if (report.warnings.length) {
         lines.push('> [!WARNING]', ...report.warnings.map((warning) => `> - ${escapeMd(warning)}`), '');
     }
-    lines.push('## Summary', '', ...table(['Result', 'Components'], [
+    lines.push(...orgSection(report.baseline, report.target), '## Summary', '', ...table(['Result', 'Components'], [
         [`${CATEGORY_ICONS.removed} ${CATEGORY_LABELS.removed}`, bold(summary.removed)],
         [`${CATEGORY_ICONS.added} ${CATEGORY_LABELS.added}`, bold(summary.added)],
         [`${CATEGORY_ICONS.changed} ${CATEGORY_LABELS.changed}`, bold(summary.changed)],
         [`${CATEGORY_ICONS.unchanged} ${CATEGORY_LABELS.unchanged}`, String(summary.unchanged)],
         ['**Total compared**', `**${summary.total}**`],
-    ]), ...listSection(report, 'removed'), ...listSection(report, 'added'), ...changedSection(report), ...orgSection(report.baseline, report.target), ...scopeSection(report), `<sub>${summary.unchanged} unchanged components are not listed. The JSON report in the workflow artifact has every component.</sub>`);
+    ]), ...listSection(report, 'removed'), ...listSection(report, 'added'), ...changedSection(report), ...scopeSection(report), `<sub>${summary.unchanged} unchanged components are not listed. The JSON report in the workflow artifact has every component.</sub>`);
     return `${lines.join('\n').trimEnd()}\n`;
+}
+/** Job Summary for a run that stopped before it could compare, such as a bad input or a failed login. */
+function renderErrorSummary(message, runUrl) {
+    return [
+        '<sub>SALESFORCE METADATA DRIFT REPORT</sub>',
+        '',
+        `# ${STATUS_ICONS.incomplete} Comparison could not run`,
+        '',
+        'No report was produced. Fix the problem below and run the workflow again.',
+        '',
+        '> [!CAUTION]',
+        `> ${escapeMd(message)}`,
+        '',
+        ...(runUrl ? [`[Workflow run](${runUrl})`, ''] : []),
+    ].join('\n');
 }
 function writeMarkdownReport(report, outputDir) {
     external_node_fs_default().mkdirSync(outputDir, { recursive: true });
@@ -150125,11 +150142,47 @@ function orgSideFromDisplay(display, fallbackLabel, userLabel) {
         instanceHost: display.instanceUrl ? safeHost(display.instanceUrl) : undefined,
     };
 }
+/** An error message when both inputs log in to the same org, which can never show drift. */
+function sameOrgError(baseline, target) {
+    if (!baseline.orgId || !target.orgId || baseline.orgId.slice(0, 15) !== target.orgId.slice(0, 15))
+        return undefined;
+    return `baseline-auth-url and target-auth-url log in to the same org (Org ID ${baseline.orgId}, ` +
+        `users ${baseline.username ?? 'unknown'} and ${target.username ?? 'unknown'}). Comparing an org with itself ` +
+        'can never show drift. Point each input at a different org, for example production and a sandbox.';
+}
+/** "acme--uat.sandbox.my.salesforce.com" → "uat". */
+function sandboxName(host) {
+    return /^[^.]+--([^.]+)\.sandbox\.my\.salesforce\.com$/.exec(host ?? '')?.[1];
+}
+/**
+ * Sandboxes copy the production company name, so two sandboxes of one org
+ * would both be called "Acme". Add the sandbox name (or org type) to tell them apart.
+ */
+function distinguishLabels(baseline, target, userLabels = {}) {
+    if (baseline.label !== target.label)
+        return;
+    const sides = [[baseline, userLabels.baseline], [target, userLabels.target]];
+    for (const [side, userLabel] of sides) {
+        if (userLabel)
+            continue;
+        const detail = sandboxName(side.instanceHost) ?? (side.orgKind !== 'unknown' ? side.orgKind : side.username);
+        if (detail)
+            side.label = `${side.label} (${detail})`;
+    }
+    if (baseline.label === target.label) {
+        if (!userLabels.baseline)
+            baseline.label = `${baseline.label} (baseline)`;
+        if (!userLabels.target)
+            target.label = `${target.label} (target)`;
+    }
+}
 function buildOrgWarnings(baseline, target) {
     const warnings = [];
-    if (baseline.orgId && target.orgId && baseline.orgId.slice(0, 15) === target.orgId.slice(0, 15)) {
-        warnings.push('Baseline and target are the same org (same Org ID). Check that baseline-auth-url and ' +
-            'target-auth-url point to different orgs.');
+    const nonProduction = ['sandbox', 'scratch', 'developer'];
+    if (target.orgKind === 'production' && nonProduction.includes(baseline.orgKind)) {
+        warnings.push(`The baseline is a ${baseline.orgKind} org and the target is production. The baseline is treated as the ` +
+            'source of truth, so "Only in target" and "Missing from target" read the other way round from what you may ' +
+            'expect. If production should be the reference, swap baseline-auth-url and target-auth-url.');
     }
     const unknown = [
         baseline.orgKind === 'unknown' ? 'baseline' : '',
@@ -150451,6 +150504,12 @@ async function login(cli, alias, authUrl, cwd, secrets, side) {
     external_node_fs_default().chmodSync(authFile, 0o600);
     try {
         await runSf(cli, ['org', 'login', 'sfdx-url', '--sfdx-url-file', authFile, '--alias', alias], cwd, secrets, `sf org login (${side}-auth-url)`);
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Could not log in with ${side}-auth-url. ${message} Check that the secret holds a current SFDX auth URL ` +
+            '(it starts with force://; get it with sf org display --verbose --json, field sfdxAuthUrl). It stops working ' +
+            'when the user is frozen or deactivated or its connected app session is revoked.');
     }
     finally {
         external_node_fs_default().rmSync(authFile, { force: true });
@@ -150778,6 +150837,10 @@ async function resolveSides(inputs, cleanup) {
         workingDir: inputs.workingDir,
     });
     cleanup.push(...result.workDirs);
+    const mismatch = sameOrgError(result.baseline.info, result.target.info);
+    if (mismatch)
+        throw new Error(mismatch);
+    distinguishLabels(result.baseline.info, result.target.info, { baseline: inputs.baselineLabel, target: inputs.targetLabel });
     return {
         baselinePath: result.baseline.path,
         targetPath: result.target.path,
@@ -150883,8 +150946,16 @@ async function run() {
     }
     catch (error) {
         setOutput('comparison-status', 'error');
-        const message = error instanceof Error ? error.message : String(error);
-        setFailed(redactAuthUrls(message, authSecrets));
+        const message = redactAuthUrls(error instanceof Error ? error.message : String(error), authSecrets);
+        setFailed(message);
+        if (getInput('job-summary').trim().toLowerCase() !== 'false') {
+            try {
+                await writeJobSummary(renderErrorSummary(message, workflowRunUrl()));
+            }
+            catch {
+                // The failure itself is already reported.
+            }
+        }
     }
     finally {
         for (const directory of cleanup)

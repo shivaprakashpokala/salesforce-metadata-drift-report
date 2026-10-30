@@ -136,20 +136,21 @@ try {
     {
       name: 'org-same-org',
       exitCode: 1,
-      outcome: 'incomplete',
+      outcome: undefined,
       orgs: {
         baseline: { id: '00D000000000001AAA', username: 'ci@acme.com', instanceUrl: 'https://acme.my.salesforce.com',
           apiVersion: '64.0', name: 'Acme', edition: 'Enterprise Edition', isSandbox: false,
           fixture: path.join(root, 'fixtures/org-a') },
         target: { id: '00D000000000001AAA', username: 'admin@acme.com', instanceUrl: 'https://acme.my.salesforce.com',
           apiVersion: '64.0', name: 'Acme', edition: 'Enterprise Edition', isSandbox: false,
-          fixture: path.join(root, 'fixtures/org-a'),
-          message: { fileName: 'unpackaged/package.xml', problem: 'Entity of type \'CustomObject\' named \'Lead\' cannot be found' } },
+          fixture: path.join(root, 'fixtures/org-a') },
       },
     },
   ];
 
   for (const { name, exitCode, outcome, orgs } of orgCases) {
+    const summaryFile = path.join(root, name + '-summary.md');
+    fs.writeFileSync(summaryFile, '');
     const state = path.join(root, name + '-state');
     fs.mkdirSync(state);
     fs.writeFileSync(path.join(state, 'orgs.json'), JSON.stringify(orgs));
@@ -161,11 +162,14 @@ try {
       'INPUT_WORKING-DIR': name + '-work',
       FAKE_SF_STATE: state,
       PATH: bin + path.delimiter + process.env.PATH,
+      'INPUT_JOB-SUMMARY': 'true',
+      GITHUB_STEP_SUMMARY: summaryFile,
     });
     assert.equal(result.status, exitCode, output);
+    const summary = fs.readFileSync(summaryFile, 'utf8');
     const logged = output.split('\n').filter((line) => !line.startsWith('::add-mask::')).join('\n');
     assert(!logged.includes('RefreshToken'), 'auth URL secret leaked into the log');
-    assert.equal(report.outcome, outcome);
+    assert.equal(report?.outcome, outcome);
 
     const calls = fs.readFileSync(path.join(state, 'calls.log'), 'utf8').trim().split('\n');
     assert.equal(calls.filter((call) => call.startsWith('org login')).length, 2);
@@ -180,7 +184,7 @@ try {
     assert(manifest.includes('<members>Account</members>'));
     assert(manifest.includes('<name>Flow</name>'));
     assert(manifest.includes('<version>64.0</version>'));
-    assert(!report.warnings.some((warning) => /different kinds|production.*sandbox/i.test(warning)));
+    assert(!report?.warnings.some((warning) => /different kinds|production.*sandbox/i.test(warning)));
 
     if (name === 'org-drift') {
       assert.deepEqual(report.summary, DRIFT_SUMMARY);
@@ -192,10 +196,11 @@ try {
       assert.deepEqual(report.warnings,
         ['Salesforce CLI (baseline org): The SFDX_ACCESS_TOKEN environment variable is deprecated.']);
     } else {
-      assert(report.warnings.some((warning) => warning.includes('same org')), report.warnings.join('\n'));
-      assert(report.warnings.includes("target org: Entity of type 'CustomObject' named 'Lead' cannot be found"),
-        report.warnings.join('\n'));
+      assert(output.includes('log in to the same org (Org ID 00D000000000001AAA'), output);
+      assert(summary.includes('# 🔴 Comparison could not run'), summary);
+      assert(summary.includes('log in to the same org'), summary);
     }
+    if (report) assert(summary.includes('## Summary'), 'the Job Summary was not written');
     console.log('Org comparison with a stub sf CLI: ' + name + ' passed');
   }
 } finally {

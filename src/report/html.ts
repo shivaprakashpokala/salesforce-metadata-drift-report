@@ -214,6 +214,15 @@ export function renderHtmlReport(report: DriftReport): string {
     <p class="route">Baseline <strong>${escapeHtml(report.baseline.label)}</strong> → target <strong>${escapeHtml(report.target.label)}</strong> · ${escapeHtml(formatTimestamp(report.generatedAt))}${runLink}</p>
   </div>
 
+  ${report.warnings.length ? `<div class="warnings" role="note"><strong>Warnings</strong><ul>${report.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}</ul></div>` : ''}
+
+  <h2>Orgs</h2>
+  <table class="orgs">
+    <thead><tr><th>Baseline (source of truth)</th><th>Target</th></tr></thead>
+    <tbody><tr>${orgCell(report.baseline)}${orgCell(report.target)}</tr></tbody>
+  </table>
+
+  <h2>Summary</h2>
   <div class="stats">
     ${stat('Only in target', summary.added, 'added')}
     ${stat('Missing from target', summary.removed, 'removed')}
@@ -221,16 +230,9 @@ export function renderHtmlReport(report: DriftReport): string {
     ${stat('Unchanged', summary.unchanged, 'unchanged')}
   </div>
 
-  ${report.warnings.length ? `<div class="warnings" role="note"><strong>Warnings</strong><ul>${report.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}</ul></div>` : ''}
-
   <h2>Differences</h2>
   ${types.length ? types.map(renderType).join('') : '<p class="empty">Nothing differs. The full list of compared components is in the JSON report.</p>'}
 
-  <h2>Orgs</h2>
-  <table class="orgs">
-    <thead><tr><th>Baseline (source of truth)</th><th>Target</th></tr></thead>
-    <tbody><tr>${orgCell(report.baseline)}${orgCell(report.target)}</tr></tbody>
-  </table>
   ${scope ? `<details class="scope"><summary>What was compared</summary><ul>${scopeList}</ul></details>` : ''}
   <p class="note">${summary.unchanged} unchanged components are not listed. The JSON report has every component.</p>
 </main>

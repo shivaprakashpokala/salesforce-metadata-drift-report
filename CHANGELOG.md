@@ -9,7 +9,11 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 
 - Clearer reports. The HTML report opens with the verdict and the counts, then lists differences grouped by metadata type, with a one-line description of each change (for example "Length: 50 → 80").
-- The Job Summary is laid out as tables in fixed sections: Summary, Missing from target, Only in target, Changed (with one table of setting changes and collapsible Apex diffs), Orgs, and What was compared. It reads in full on the workflow run page without downloading the HTML report.
+- The Job Summary is laid out as left-aligned tables in fixed sections: Orgs, Summary, Missing from target, Only in target, Changed (with one table of setting changes and collapsible Apex diffs), and What was compared. It reads in full on the workflow run page without downloading the HTML report.
+- Baseline and target logging in to the same org now stops the run with an error instead of a warning, since such a comparison can never show drift.
+- When two orgs have the same name, as two sandboxes of one production org do, the report adds the sandbox name (for example "Acme (uat)" and "Acme (qa)").
+- A warning when a sandbox, scratch or Developer Edition org is the baseline and production is the target, which usually means the inputs are swapped.
+- A failed login names the input and explains how to get a working SFDX auth URL. When the run stops before comparing, the Job Summary says why instead of staying empty.
 - Settings inside a component are shown in plain words, such as "Object permissions › Account › Allow edit", instead of XML paths. An entry that exists in only one org is shown once, marked as only in target or missing from target.
 - The HTML report has a light and a dark theme, follows the system setting, and works at phone width. URL-encoded names such as `Force%2Ecom - Free User` are shown decoded.
 

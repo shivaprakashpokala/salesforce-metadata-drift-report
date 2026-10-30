@@ -198,6 +198,13 @@ async function login(cli: CliExecutor, alias: string, authUrl: string, cwd: stri
       secrets,
       `sf org login (${side}-auth-url)`,
     );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Could not log in with ${side}-auth-url. ${message} Check that the secret holds a current SFDX auth URL ` +
+        '(it starts with force://; get it with sf org display --verbose --json, field sfdxAuthUrl). It stops working ' +
+        'when the user is frozen or deactivated or its connected app session is revoked.',
+    );
   } finally {
     fs.rmSync(authFile, { force: true });
   }
