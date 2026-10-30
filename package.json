@@ -1,6 +1,6 @@
 {
   "name": "salesforce-metadata-drift-report",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Salesforce Metadata Drift Report — GitHub Action that detects metadata drift between a baseline org (source of truth) and a sandbox and publishes a detailed report artifact",
   "private": true,
   "repository": {
