@@ -6,3 +6,4 @@ drift-report/
 coverage/
 *.tsbuildinfo
 /licenses.txt
+live-validation-reports/

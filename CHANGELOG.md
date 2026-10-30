@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Notices from the Salesforce CLI itself, such as deprecation warnings, are shown in the report but no longer make the comparison incomplete. Only problems the Metadata API reports for the retrieve do.
+- Profile and permission set `layoutAssignments` and `loginIpRanges` are matched by their content, so one added or reordered entry is reported as that entry instead of shifting every entry after it.
+- The action runs the Salesforce CLI with a home folder of its own and removes it afterwards. Logging out no longer removes a login the runner already had for the same user, which affected self-hosted runners and local runs.
+- A retrieve that exceeds the Metadata API limit of 10,000 files or 39 MB fails with an explanation and how to narrow the scope.
+
+### Documentation
+
+- README: describe the per-retrieve Metadata API limit.
+- CONTRIBUTING: test against two free scratch orgs with `npm run test:live`.
+
 ## [1.0.2] - 2026-10-09
 
 ### Documentation

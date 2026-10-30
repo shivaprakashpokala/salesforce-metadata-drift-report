@@ -98628,24 +98628,27 @@ const parser = new XMLParser({
 });
 // Profile and permission set lists are unordered sets keyed by these elements,
 // so reordering is not drift. Every other list (layout items, for example)
-// keeps its order because the order is meaningful.
+// keeps its order because the order is meaningful. A list keyed by several
+// elements needs the first one; the rest are optional parts of the key.
 const PERMISSION_IDENTITIES = {
-    fieldPermissions: 'field',
-    objectPermissions: 'object',
-    classAccesses: 'apexClass',
-    pageAccesses: 'apexPage',
-    applicationVisibilities: 'application',
-    tabVisibilities: 'tab',
-    tabSettings: 'tab',
-    recordTypeVisibilities: 'recordType',
-    userPermissions: 'name',
-    customPermissions: 'name',
-    flowAccesses: 'flow',
-    customMetadataTypeAccesses: 'name',
-    customSettingAccesses: 'name',
-    externalDataSourceAccesses: 'externalDataSource',
+    fieldPermissions: ['field'],
+    objectPermissions: ['object'],
+    classAccesses: ['apexClass'],
+    pageAccesses: ['apexPage'],
+    applicationVisibilities: ['application'],
+    tabVisibilities: ['tab'],
+    tabSettings: ['tab'],
+    recordTypeVisibilities: ['recordType'],
+    userPermissions: ['name'],
+    customPermissions: ['name'],
+    flowAccesses: ['flow'],
+    customMetadataTypeAccesses: ['name'],
+    customSettingAccesses: ['name'],
+    externalDataSourceAccesses: ['externalDataSource'],
+    layoutAssignments: ['layout', 'recordType'],
+    loginIpRanges: ['startAddress', 'endAddress'],
 };
-function identityField(xmlPath) {
+function identityFields(xmlPath) {
     const [root, collection, ...rest] = xmlPath.split('.');
     return (root === 'Profile' || root === 'PermissionSet') && rest.length === 0
         ? PERMISSION_IDENTITIES[collection] : undefined;
@@ -98663,11 +98666,13 @@ function isPlainObject(value) {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 function identityValue(item, xmlPath) {
-    const key = identityField(xmlPath);
-    if (!key || !isPlainObject(item))
+    const keys = identityFields(xmlPath);
+    if (!keys || !isPlainObject(item))
         return null;
-    const value = item[key];
-    return typeof value === 'string' && value.trim() ? value.trim() : null;
+    const values = keys.map((key) => (typeof item[key] === 'string' ? item[key].trim() : ''));
+    if (!values[0])
+        return null;
+    return values.filter(Boolean).join('|');
 }
 function keyedArray(items, xmlPath) {
     const ids = items.map((item) => identityValue(item, xmlPath));
@@ -101986,6 +101991,7 @@ class AbortError extends Error {
 //# sourceMappingURL=AbortError.js.map
 // EXTERNAL MODULE: external "node:os"
 var external_node_os_ = __nccwpck_require__(48161);
+var external_node_os_default = /*#__PURE__*/__nccwpck_require__.n(external_node_os_);
 // EXTERNAL MODULE: external "node:util"
 var external_node_util_ = __nccwpck_require__(57975);
 ;// CONCATENATED MODULE: external "node:process"
@@ -150064,6 +150070,7 @@ function createDefaultCliExecutor() {
         exec(command, args, options = {}) {
             return (0,lib_exec.exec)(command, args, {
                 cwd: options.cwd,
+                env: options.env,
                 silent: options.silent ?? true,
                 ignoreReturnCode: true,
             });
@@ -150073,6 +150080,7 @@ function createDefaultCliExecutor() {
             let stderr = '';
             const exitCode = await (0,lib_exec.exec)(command, args, {
                 cwd: options.cwd,
+                env: options.env,
                 silent: options.silent ?? true,
                 ignoreReturnCode: true,
                 listeners: {
@@ -150086,6 +150094,24 @@ function createDefaultCliExecutor() {
             });
             return { exitCode, stdout, stderr };
         },
+    };
+}
+/**
+ * Run every command with its own home folder, so the sf CLI keeps this run's
+ * logins there instead of in the user's ~/.sf and ~/.sfdx. Logging out by
+ * username then cannot remove a login the user already had for the same user.
+ */
+function withIsolatedHome(cli, home, env = process.env) {
+    const isolated = {
+        ...env,
+        HOME: home,
+        USERPROFILE: home,
+        // Keep the encryption key in the home folder, not the macOS or Linux keychain.
+        SF_USE_GENERIC_UNIX_KEYCHAIN: 'true',
+    };
+    return {
+        exec: (command, args, options = {}) => cli.exec(command, args, { ...options, env: isolated }),
+        captureOutput: (command, args, options = {}) => cli.captureOutput(command, args, { ...options, env: isolated }),
     };
 }
 
@@ -150177,6 +150203,7 @@ async function fetchOrgDisplay(cli, alias, cwd) {
 
 
 
+
 /** Used only when neither org reports its API version. */
 const FALLBACK_API_VERSION = '64.0';
 const RETRIEVE_WAIT_MINUTES = '33';
@@ -150210,6 +150237,11 @@ const WILDCARD_METADATA_TYPES = new Set([
     'StaticResource',
     'Workflow',
 ]);
+// Metadata API retrieves are capped at 10,000 files and 39 MB (zipped) per call.
+const RETRIEVE_LIMIT_PATTERN = /LIMIT_EXCEEDED|too many files|maximum size limit/i;
+const RETRIEVE_LIMIT_MESSAGE = 'The retrieve exceeded the Metadata API limit of 10,000 files or 39 MB per call. Narrow the comparison: ' +
+    'list fewer types in metadata-types, or use package-xml-path with named members instead of wildcards. ' +
+    'Keep Profile and PermissionSet in the same comparison as the components they grant access to.';
 const TYPE_HINTS = {
     CustomField: 'Custom fields are retrieved with CustomObject; remove CustomField from metadata-types.',
     CustomLabels: 'Use CustomLabel (singular) to retrieve all custom labels.',
@@ -150331,7 +150363,16 @@ function formatRetrieveWarning(warning) {
     return JSON.stringify(warning);
 }
 async function retrieveMetadata(cli, alias, workDir, manifest, secrets) {
-    const result = await runSf(cli, ['project', 'retrieve', 'start', '--manifest', manifest, '--target-org', alias, '--wait', RETRIEVE_WAIT_MINUTES, '--json'], workDir, secrets, 'sf project retrieve start', { stdoutInErrors: true });
+    let result;
+    try {
+        result = await runSf(cli, ['project', 'retrieve', 'start', '--manifest', manifest, '--target-org', alias, '--wait', RETRIEVE_WAIT_MINUTES, '--json'], workDir, secrets, 'sf project retrieve start', { stdoutInErrors: true });
+    }
+    catch (error) {
+        if (error instanceof Error && RETRIEVE_LIMIT_PATTERN.test(error.message)) {
+            throw new Error(`${RETRIEVE_LIMIT_MESSAGE} ${error.message}`);
+        }
+        throw error;
+    }
     let payload;
     try {
         payload = JSON.parse(result.stdout);
@@ -150340,19 +150381,25 @@ async function retrieveMetadata(cli, alias, workDir, manifest, secrets) {
         throw new Error('Salesforce retrieve returned output that is not JSON, so the comparison cannot be trusted.');
     }
     if (payload.status !== 0 || (payload.result?.status !== 'Succeeded' && payload.result?.success !== true)) {
+        if (RETRIEVE_LIMIT_PATTERN.test(result.stdout))
+            throw new Error(RETRIEVE_LIMIT_MESSAGE);
         throw new Error('Salesforce retrieve did not report success, so the comparison cannot be trusted.');
     }
     // The Metadata API returns a bare object instead of an array when there is one message.
     const asList = (value) => (value == null ? [] : Array.isArray(value) ? value : [value]);
-    return [...asList(payload.warnings), ...asList(payload.result?.messages)]
-        .map((warning) => redactAuthUrls(formatRetrieveWarning(warning), secrets));
+    const format = (warning) => redactAuthUrls(formatRetrieveWarning(warning), secrets);
+    return {
+        warnings: asList(payload.result?.messages).map(format),
+        cliWarnings: asList(payload.warnings).map(format),
+    };
 }
 /**
  * Log in to both orgs, settle on one API version, retrieve the same manifest
- * from each, and always log out again so no credentials stay in the CLI store.
+ * from each, and always log out again. The CLI runs with a home folder of its
+ * own, removed afterwards, so no credentials stay behind and logins the user
+ * already had are left alone.
  */
 async function retrieveOrgs(request, deps = {}) {
-    const cli = deps.cli ?? createDefaultCliExecutor();
     const secrets = [request.baselineAuthUrl, request.targetAuthUrl];
     const manifestPath = request.packageXmlPath ? external_node_path_default().resolve(request.packageXmlPath) : undefined;
     if (manifestPath) {
@@ -150365,6 +150412,15 @@ async function retrieveOrgs(request, deps = {}) {
     }
     if (request.apiVersion)
         validateApiVersion(request.apiVersion);
+    const cliHome = external_node_fs_default().mkdtempSync(external_node_path_default().join(external_node_os_default().tmpdir(), 'sf-drift-cli-'));
+    try {
+        return await retrieveWithCli(request, withIsolatedHome(deps.cli ?? createDefaultCliExecutor(), cliHome), manifestPath, secrets);
+    }
+    finally {
+        external_node_fs_default().rmSync(cliHome, { recursive: true, force: true });
+    }
+}
+async function retrieveWithCli(request, cli, manifestPath, secrets) {
     await assertSfCliAvailable(cli);
     const root = external_node_path_default().resolve(request.workingDir);
     external_node_fs_default().mkdirSync(root, { recursive: true });
@@ -150394,13 +150450,14 @@ async function retrieveOrgs(request, deps = {}) {
                 manifest = external_node_path_default().join(session.workDir, 'package.xml');
                 external_node_fs_default().writeFileSync(manifest, buildPackageXml(request.metadataTypes, apiVersion, request.standardObjects), 'utf8');
             }
-            const warnings = await retrieveMetadata(cli, session.alias, session.workDir, manifest, secrets);
+            const { warnings, cliWarnings } = await retrieveMetadata(cli, session.alias, session.workDir, manifest, secrets);
             retrieved.push({
                 side: session.side,
                 path: external_node_path_default().join(session.workDir, 'force-app', 'main', 'default'),
                 info: orgSideFromDisplay(session.display, `${session.side} org`, labels[session.side]),
                 retrievedAt: new Date().toISOString(),
                 warnings,
+                cliWarnings,
             });
         }
         return {
@@ -150604,7 +150661,12 @@ async function resolveSides(inputs, cleanup) {
         baseline: result.baseline.info,
         target: result.target.info,
         apiVersion: result.apiVersion,
-        retrievals: [result.baseline, result.target].map(({ side, retrievedAt, warnings }) => ({ side, retrievedAt, warnings })),
+        retrievals: [result.baseline, result.target].map(({ side, retrievedAt, warnings, cliWarnings }) => ({
+            side,
+            retrievedAt,
+            warnings,
+            cliWarnings,
+        })),
         fromOrgs: true,
     };
 }
@@ -150626,10 +150688,13 @@ async function run() {
         const targetTree = applyScope(await normalizeMetadataTree(sides.targetPath), scope);
         info(`Compared ${baselineTree.components.size} baseline and ${targetTree.components.size} target components.`);
         const retrievalWarnings = sides.retrievals.flatMap((item) => item.warnings.map((warning) => `${item.side} org: ${warning}`));
+        // CLI notices are shown but do not make the comparison incomplete.
+        const cliWarnings = sides.retrievals.flatMap((item) => (item.cliWarnings ?? []).map((warning) => `Salesforce CLI (${item.side} org): ${warning}`));
         const warnings = [
             ...(sides.fromOrgs ? buildOrgWarnings(sides.baseline, sides.target) : []),
             ...[standardObjectsWarning(scope)].filter((warning) => Boolean(warning)),
             ...retrievalWarnings,
+            ...cliWarnings,
         ];
         for (const warning of warnings)
             core_warning(warning);

@@ -65,7 +65,12 @@ async function resolveSides(inputs: ActionInputs, cleanup: string[]): Promise<Co
     baseline: result.baseline.info,
     target: result.target.info,
     apiVersion: result.apiVersion,
-    retrievals: [result.baseline, result.target].map(({ side, retrievedAt, warnings }) => ({ side, retrievedAt, warnings })),
+    retrievals: [result.baseline, result.target].map(({ side, retrievedAt, warnings, cliWarnings }) => ({
+      side,
+      retrievedAt,
+      warnings,
+      cliWarnings,
+    })),
     fromOrgs: true,
   };
 }
@@ -90,10 +95,15 @@ export async function run(): Promise<void> {
     core.info(`Compared ${baselineTree.components.size} baseline and ${targetTree.components.size} target components.`);
 
     const retrievalWarnings = sides.retrievals.flatMap((item) => item.warnings.map((warning) => `${item.side} org: ${warning}`));
+    // CLI notices are shown but do not make the comparison incomplete.
+    const cliWarnings = sides.retrievals.flatMap(
+      (item) => (item.cliWarnings ?? []).map((warning) => `Salesforce CLI (${item.side} org): ${warning}`),
+    );
     const warnings = [
       ...(sides.fromOrgs ? buildOrgWarnings(sides.baseline, sides.target) : []),
       ...[standardObjectsWarning(scope)].filter((warning): warning is string => Boolean(warning)),
       ...retrievalWarnings,
+      ...cliWarnings,
     ];
     for (const warning of warnings) core.warning(warning);
 

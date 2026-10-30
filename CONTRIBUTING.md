@@ -14,6 +14,22 @@ npm run test:bundle
 
 Tests must not call a real org or the artifact service. Use a fake `CliExecutor` (see `__tests__/retrieve.test.ts`) or `ArtifactUploader` (see `__tests__/artifact.test.ts`). Do not commit auth URLs or real org metadata.
 
+## Testing against real orgs
+
+You don't need Salesforce instances of your own. Sign up for a free Developer Edition org at <https://developer.salesforce.com/signup>, enable **Dev Hub** in Setup, and log the CLI in to it:
+
+```bash
+sf org login web --set-default-dev-hub --alias drift-hub
+```
+
+Then run:
+
+```bash
+npm run test:live -- --dev-hub drift-hub
+```
+
+The script creates two scratch orgs, deploys different test metadata to each, runs the committed `dist/` against them three ways (default inputs, a standard object that does not exist, and `scripts/live-validation/package.xml`), and checks every report. It deletes the scratch orgs at the end; pass `--keep` to look at them yourself. The reports are copied to `live-validation-reports/`, which is git-ignored because they contain usernames and Org IDs. A Developer Edition Dev Hub allows 3 active and 6 new scratch orgs a day, and each run uses 2.
+
 ## Releasing
 
 1. Update the version in `package.json` and `package-lock.json`, and add a `CHANGELOG.md` entry.

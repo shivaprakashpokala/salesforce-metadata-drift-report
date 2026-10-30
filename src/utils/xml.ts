@@ -9,25 +9,28 @@ const parser = new XMLParser({
 
 // Profile and permission set lists are unordered sets keyed by these elements,
 // so reordering is not drift. Every other list (layout items, for example)
-// keeps its order because the order is meaningful.
-const PERMISSION_IDENTITIES: Record<string, string> = {
-  fieldPermissions: 'field',
-  objectPermissions: 'object',
-  classAccesses: 'apexClass',
-  pageAccesses: 'apexPage',
-  applicationVisibilities: 'application',
-  tabVisibilities: 'tab',
-  tabSettings: 'tab',
-  recordTypeVisibilities: 'recordType',
-  userPermissions: 'name',
-  customPermissions: 'name',
-  flowAccesses: 'flow',
-  customMetadataTypeAccesses: 'name',
-  customSettingAccesses: 'name',
-  externalDataSourceAccesses: 'externalDataSource',
+// keeps its order because the order is meaningful. A list keyed by several
+// elements needs the first one; the rest are optional parts of the key.
+const PERMISSION_IDENTITIES: Record<string, string[]> = {
+  fieldPermissions: ['field'],
+  objectPermissions: ['object'],
+  classAccesses: ['apexClass'],
+  pageAccesses: ['apexPage'],
+  applicationVisibilities: ['application'],
+  tabVisibilities: ['tab'],
+  tabSettings: ['tab'],
+  recordTypeVisibilities: ['recordType'],
+  userPermissions: ['name'],
+  customPermissions: ['name'],
+  flowAccesses: ['flow'],
+  customMetadataTypeAccesses: ['name'],
+  customSettingAccesses: ['name'],
+  externalDataSourceAccesses: ['externalDataSource'],
+  layoutAssignments: ['layout', 'recordType'],
+  loginIpRanges: ['startAddress', 'endAddress'],
 };
 
-function identityField(xmlPath: string): string | undefined {
+function identityFields(xmlPath: string): string[] | undefined {
   const [root, collection, ...rest] = xmlPath.split('.');
   return (root === 'Profile' || root === 'PermissionSet') && rest.length === 0
     ? PERMISSION_IDENTITIES[collection] : undefined;
@@ -47,10 +50,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 function identityValue(item: unknown, xmlPath: string): string | null {
-  const key = identityField(xmlPath);
-  if (!key || !isPlainObject(item)) return null;
-  const value = item[key];
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
+  const keys = identityFields(xmlPath);
+  if (!keys || !isPlainObject(item)) return null;
+  const values = keys.map((key) => (typeof item[key] === 'string' ? (item[key] as string).trim() : ''));
+  if (!values[0]) return null;
+  return values.filter(Boolean).join('|');
 }
 
 function keyedArray(items: unknown[], xmlPath: string): { keyed: boolean; ordered: unknown[] } {

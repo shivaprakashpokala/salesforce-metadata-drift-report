@@ -66,6 +66,8 @@ Left out unless you ask for them:
 
 If Salesforce cannot return part of the scope, or a retrieved file is not metadata, the outcome is **incomplete**. The report is still published, and the step fails.
 
+Each org is retrieved in one Metadata API call, which Salesforce caps at 10,000 files and 39 MB. A large org can pass that limit with the default scope, and the step fails with `error`. Narrow `metadata-types`, or list named members in a `package.xml`. Keep Profile and PermissionSet in the same comparison as the components they grant access to, because Salesforce only returns profile entries for components in the same retrieve.
+
 ## How drift is found
 
 ```mermaid

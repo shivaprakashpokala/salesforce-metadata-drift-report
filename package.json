@@ -13,6 +13,7 @@
     "build": "tsc --noEmit && node scripts/build.mjs",
     "test": "vitest run",
     "test:bundle": "node scripts/smoke-test.mjs",
+    "test:live": "node scripts/live-validation/scratch-orgs.mjs",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
     "prepare": "npm run build"

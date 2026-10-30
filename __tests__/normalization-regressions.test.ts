@@ -27,6 +27,16 @@ describe('metadata comparison regressions', () => {
       'profiles/Test.profile-meta.xml': '<Profile><label>Test</Profile>',
     }))).rejects.toThrow('Invalid metadata XML');
   });
+  it('reports one added profile layout assignment as one change, regardless of order', async () => {
+    const assignment = (layout: string, recordType = '') =>
+      `<layoutAssignments><layout>${layout}</layout>${recordType && `<recordType>${recordType}</recordType>`}</layoutAssignments>`;
+    const profile = (body: string) => ({ 'profiles/Admin.profile-meta.xml': xml('Profile', body) });
+    const report = await compare('layout-assignments',
+      profile(assignment('Account-A') + assignment('Case-C') + assignment('Case-C', 'Case.Support')),
+      profile(assignment('Case-C', 'Case.Support') + assignment('Contact-X') + assignment('Account-A') + assignment('Case-C')));
+    const paths = report.components[0].fieldChanges?.map((change) => change.path);
+    expect(paths).toEqual(['Profile.layoutAssignments[Contact-X].layout']);
+  });
   it('compares embedded MDAPI fields with decomposed source fields', async () => {
     const field = '<fullName>Test__c</fullName><type>Text</type><length>30</length>';
     const report = await compare('embedded', {

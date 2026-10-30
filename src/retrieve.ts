@@ -1,8 +1,9 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { CliExecutor } from './cli.js';
-import { createDefaultCliExecutor } from './cli.js';
+import { createDefaultCliExecutor, withIsolatedHome } from './cli.js';
 import { fetchOrgDisplay } from './org-info.js';
 import { orgSideFromDisplay, type OrgSideInfo, type SfOrgDisplayFields } from './org-kind.js';
 import { formatCommandError, redactAuthUrls } from './redact.js';
@@ -44,6 +45,13 @@ export const WILDCARD_METADATA_TYPES = new Set([
   'Workflow',
 ]);
 
+// Metadata API retrieves are capped at 10,000 files and 39 MB (zipped) per call.
+const RETRIEVE_LIMIT_PATTERN = /LIMIT_EXCEEDED|too many files|maximum size limit/i;
+export const RETRIEVE_LIMIT_MESSAGE =
+  'The retrieve exceeded the Metadata API limit of 10,000 files or 39 MB per call. Narrow the comparison: ' +
+  'list fewer types in metadata-types, or use package-xml-path with named members instead of wildcards. ' +
+  'Keep Profile and PermissionSet in the same comparison as the components they grant access to.';
+
 const TYPE_HINTS: Record<string, string> = {
   CustomField: 'Custom fields are retrieved with CustomObject; remove CustomField from metadata-types.',
   CustomLabels: 'Use CustomLabel (singular) to retrieve all custom labels.',
@@ -71,7 +79,10 @@ export interface RetrievedSide {
   path: string;
   info: OrgSideInfo;
   retrievedAt: string;
+  /** Problems the Metadata API reported for the retrieve. Any of these makes the comparison incomplete. */
   warnings: string[];
+  /** Notices from the sf CLI itself, such as deprecations. Reported, but they say nothing about the metadata. */
+  cliWarnings: string[];
 }
 
 export interface RetrieveResult {
@@ -234,15 +245,23 @@ async function retrieveMetadata(
   workDir: string,
   manifest: string,
   secrets: string[],
-): Promise<string[]> {
-  const result = await runSf(
-    cli,
-    ['project', 'retrieve', 'start', '--manifest', manifest, '--target-org', alias, '--wait', RETRIEVE_WAIT_MINUTES, '--json'],
-    workDir,
-    secrets,
-    'sf project retrieve start',
-    { stdoutInErrors: true },
-  );
+): Promise<{ warnings: string[]; cliWarnings: string[] }> {
+  let result;
+  try {
+    result = await runSf(
+      cli,
+      ['project', 'retrieve', 'start', '--manifest', manifest, '--target-org', alias, '--wait', RETRIEVE_WAIT_MINUTES, '--json'],
+      workDir,
+      secrets,
+      'sf project retrieve start',
+      { stdoutInErrors: true },
+    );
+  } catch (error) {
+    if (error instanceof Error && RETRIEVE_LIMIT_PATTERN.test(error.message)) {
+      throw new Error(`${RETRIEVE_LIMIT_MESSAGE} ${error.message}`);
+    }
+    throw error;
+  }
 
   let payload: { status?: number; warnings?: unknown; result?: { status?: string; success?: boolean; messages?: unknown } };
   try {
@@ -251,13 +270,17 @@ async function retrieveMetadata(
     throw new Error('Salesforce retrieve returned output that is not JSON, so the comparison cannot be trusted.');
   }
   if (payload.status !== 0 || (payload.result?.status !== 'Succeeded' && payload.result?.success !== true)) {
+    if (RETRIEVE_LIMIT_PATTERN.test(result.stdout)) throw new Error(RETRIEVE_LIMIT_MESSAGE);
     throw new Error('Salesforce retrieve did not report success, so the comparison cannot be trusted.');
   }
 
   // The Metadata API returns a bare object instead of an array when there is one message.
   const asList = (value: unknown): unknown[] => (value == null ? [] : Array.isArray(value) ? value : [value]);
-  return [...asList(payload.warnings), ...asList(payload.result?.messages)]
-    .map((warning) => redactAuthUrls(formatRetrieveWarning(warning), secrets));
+  const format = (warning: unknown) => redactAuthUrls(formatRetrieveWarning(warning), secrets);
+  return {
+    warnings: asList(payload.result?.messages).map(format),
+    cliWarnings: asList(payload.warnings).map(format),
+  };
 }
 
 interface Session {
@@ -270,10 +293,11 @@ interface Session {
 
 /**
  * Log in to both orgs, settle on one API version, retrieve the same manifest
- * from each, and always log out again so no credentials stay in the CLI store.
+ * from each, and always log out again. The CLI runs with a home folder of its
+ * own, removed afterwards, so no credentials stay behind and logins the user
+ * already had are left alone.
  */
 export async function retrieveOrgs(request: RetrieveRequest, deps: RetrieveDeps = {}): Promise<RetrieveResult> {
-  const cli = deps.cli ?? createDefaultCliExecutor();
   const secrets = [request.baselineAuthUrl, request.targetAuthUrl];
   const manifestPath = request.packageXmlPath ? path.resolve(request.packageXmlPath) : undefined;
 
@@ -286,6 +310,20 @@ export async function retrieveOrgs(request: RetrieveRequest, deps: RetrieveDeps 
   }
   if (request.apiVersion) validateApiVersion(request.apiVersion);
 
+  const cliHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-drift-cli-'));
+  try {
+    return await retrieveWithCli(request, withIsolatedHome(deps.cli ?? createDefaultCliExecutor(), cliHome), manifestPath, secrets);
+  } finally {
+    fs.rmSync(cliHome, { recursive: true, force: true });
+  }
+}
+
+async function retrieveWithCli(
+  request: RetrieveRequest,
+  cli: CliExecutor,
+  manifestPath: string | undefined,
+  secrets: string[],
+): Promise<RetrieveResult> {
   await assertSfCliAvailable(cli);
 
   const root = path.resolve(request.workingDir);
@@ -319,13 +357,14 @@ export async function retrieveOrgs(request: RetrieveRequest, deps: RetrieveDeps 
         manifest = path.join(session.workDir, 'package.xml');
         fs.writeFileSync(manifest, buildPackageXml(request.metadataTypes, apiVersion, request.standardObjects), 'utf8');
       }
-      const warnings = await retrieveMetadata(cli, session.alias, session.workDir, manifest, secrets);
+      const { warnings, cliWarnings } = await retrieveMetadata(cli, session.alias, session.workDir, manifest, secrets);
       retrieved.push({
         side: session.side,
         path: path.join(session.workDir, 'force-app', 'main', 'default'),
         info: orgSideFromDisplay(session.display, `${session.side} org`, labels[session.side]),
         retrievedAt: new Date().toISOString(),
         warnings,
+        cliWarnings,
       });
     }
 
