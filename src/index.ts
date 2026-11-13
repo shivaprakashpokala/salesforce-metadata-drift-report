@@ -152,17 +152,28 @@ export async function run(): Promise<void> {
     }
 
     if (inputs.uploadArtifact) {
-      const result = await publishReportArtifact({
-        name: inputs.artifactName,
-        files: [mdPath, jsonPath, htmlPath],
-        rootDirectory: outputDir,
-        retentionDays: inputs.artifactRetentionDays,
-      });
-      if (result.uploaded) {
-        core.info(`Published artifact "${inputs.artifactName}".`);
-        if (result.id !== undefined) core.setOutput('artifact-id', String(result.id));
-      } else {
-        core.warning(`Artifact upload skipped: ${result.reason}.`);
+      // The comparison is already reported, so a failed upload fails the step without replacing its result.
+      try {
+        const result = await publishReportArtifact({
+          name: inputs.artifactName,
+          files: [mdPath, jsonPath, htmlPath],
+          rootDirectory: outputDir,
+          retentionDays: inputs.artifactRetentionDays,
+        });
+        if (result.uploaded) {
+          core.info(`Published artifact "${inputs.artifactName}".`);
+          if (result.id !== undefined) core.setOutput('artifact-id', String(result.id));
+        } else {
+          core.warning(`Artifact upload skipped: ${result.reason}.`);
+        }
+      } catch (error) {
+        const reason = redactAuthUrls(error instanceof Error ? error.message : String(error), authSecrets);
+        core.setFailed(
+          `The comparison finished (${report.outcome}) but the report artifact "${inputs.artifactName}" could not be ` +
+            `uploaded (${reason}). The report files are in ${outputDir}` +
+            `${inputs.jobSummary ? ' and the Job Summary' : ''}. An artifact name can be used once per workflow run, ` +
+            'so set artifact-name per job when comparing several orgs.',
+        );
       }
     }
 

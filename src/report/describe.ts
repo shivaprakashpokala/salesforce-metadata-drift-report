@@ -10,6 +10,7 @@ export interface ChangeGroup {
 }
 
 const LABELS: Record<string, string> = {
+  '@order': 'Order',
   applicationVisibilities: 'App visibility',
   classAccesses: 'Apex class access',
   customMetadataTypeAccesses: 'Custom metadata type access',

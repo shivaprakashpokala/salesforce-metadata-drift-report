@@ -30,6 +30,12 @@ const PERMISSION_IDENTITIES: Record<string, string[]> = {
   loginIpRanges: ['startAddress', 'endAddress'],
 };
 
+// Everywhere else, entries of a list are matched by their own name when every
+// entry has one and no two share it: picklist values by fullName, Flow elements
+// by name. Their order still counts, so a reorder is reported on its own.
+const NAME_ELEMENTS = ['fullName', 'name'];
+const ORDER_SUFFIX = '.@order';
+
 function identityFields(xmlPath: string): string[] | undefined {
   const [root, collection, ...rest] = xmlPath.split('.');
   return (root === 'Profile' || root === 'PermissionSet') && rest.length === 0
@@ -50,8 +56,17 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 function identityValue(item: unknown, xmlPath: string): string | null {
+  if (!isPlainObject(item)) return null;
   const keys = identityFields(xmlPath);
-  if (!keys || !isPlainObject(item)) return null;
+  if (!keys) {
+    // The root element's own fullName names the component, not a list entry.
+    if (!xmlPath.includes('.')) return null;
+    for (const key of NAME_ELEMENTS) {
+      const name = item[key];
+      if (typeof name === 'string' && name.trim()) return name.trim();
+    }
+    return null;
+  }
   const values = keys.map((key) => (typeof item[key] === 'string' ? (item[key] as string).trim() : ''));
   if (!values[0]) return null;
   return values.filter(Boolean).join('|');
@@ -61,6 +76,8 @@ function keyedArray(items: unknown[], xmlPath: string): { keyed: boolean; ordere
   const ids = items.map((item) => identityValue(item, xmlPath));
   const keyed = ids.every((id): id is string => Boolean(id)) && new Set(ids).size === ids.length;
   if (!keyed) return { keyed: false, ordered: items };
+  // Only the permission lists are unordered sets.
+  if (!identityFields(xmlPath)) return { keyed: true, ordered: items };
   const ordered = [...items].sort((a, b) => {
     const left = identityValue(a, xmlPath)!;
     const right = identityValue(b, xmlPath)!;
@@ -118,6 +135,9 @@ export function flattenXmlObject(
       const segment = id ? `${prefix}[${id}]` : `${prefix}[${index}]`;
       flattenXmlObject(item, segment, result, xmlPath);
     });
+    if (keyed && prefix && !identityFields(xmlPath)) {
+      result[`${prefix}${ORDER_SUFFIX}`] = ordered.map((item) => identityValue(item, xmlPath)).join('\n');
+    }
     return result;
   }
 
@@ -149,6 +169,17 @@ export function diffFlattenedMaps(
   for (const key of [...allKeys].sort()) {
     const b = baseline[key];
     const t = target[key];
+    if (key.endsWith(ORDER_SUFFIX)) {
+      // Entries only one side has are reported themselves; compare the order of the rest.
+      if (b === undefined || t === undefined) continue;
+      const baselineIds = b.split('\n');
+      const targetIds = t.split('\n');
+      const shared = (ids: string[], other: string[]) => ids.filter((id) => other.includes(id)).join(', ');
+      const baselineOrder = shared(baselineIds, targetIds);
+      const targetOrder = shared(targetIds, baselineIds);
+      if (baselineOrder !== targetOrder) changes.push({ path: key, baselineValue: baselineOrder, targetValue: targetOrder });
+      continue;
+    }
     if (b !== t) {
       changes.push({
         path: key,

@@ -98648,6 +98648,11 @@ const PERMISSION_IDENTITIES = {
     layoutAssignments: ['layout', 'recordType'],
     loginIpRanges: ['startAddress', 'endAddress'],
 };
+// Everywhere else, entries of a list are matched by their own name when every
+// entry has one and no two share it: picklist values by fullName, Flow elements
+// by name. Their order still counts, so a reorder is reported on its own.
+const NAME_ELEMENTS = ['fullName', 'name'];
+const ORDER_SUFFIX = '.@order';
 function identityFields(xmlPath) {
     const [root, collection, ...rest] = xmlPath.split('.');
     return (root === 'Profile' || root === 'PermissionSet') && rest.length === 0
@@ -98666,9 +98671,20 @@ function isPlainObject(value) {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 function identityValue(item, xmlPath) {
-    const keys = identityFields(xmlPath);
-    if (!keys || !isPlainObject(item))
+    if (!isPlainObject(item))
         return null;
+    const keys = identityFields(xmlPath);
+    if (!keys) {
+        // The root element's own fullName names the component, not a list entry.
+        if (!xmlPath.includes('.'))
+            return null;
+        for (const key of NAME_ELEMENTS) {
+            const name = item[key];
+            if (typeof name === 'string' && name.trim())
+                return name.trim();
+        }
+        return null;
+    }
     const values = keys.map((key) => (typeof item[key] === 'string' ? item[key].trim() : ''));
     if (!values[0])
         return null;
@@ -98679,6 +98695,9 @@ function keyedArray(items, xmlPath) {
     const keyed = ids.every((id) => Boolean(id)) && new Set(ids).size === ids.length;
     if (!keyed)
         return { keyed: false, ordered: items };
+    // Only the permission lists are unordered sets.
+    if (!identityFields(xmlPath))
+        return { keyed: true, ordered: items };
     const ordered = [...items].sort((a, b) => {
         const left = identityValue(a, xmlPath);
         const right = identityValue(b, xmlPath);
@@ -98729,6 +98748,9 @@ function flattenXmlObject(obj, prefix = '', result = {}, xmlPath = prefix) {
             const segment = id ? `${prefix}[${id}]` : `${prefix}[${index}]`;
             flattenXmlObject(item, segment, result, xmlPath);
         });
+        if (keyed && prefix && !identityFields(xmlPath)) {
+            result[`${prefix}${ORDER_SUFFIX}`] = ordered.map((item) => identityValue(item, xmlPath)).join('\n');
+        }
         return result;
     }
     for (const [key, value] of Object.entries(obj)) {
@@ -98757,6 +98779,19 @@ function diffFlattenedMaps(baseline, target) {
     for (const key of [...allKeys].sort()) {
         const b = baseline[key];
         const t = target[key];
+        if (key.endsWith(ORDER_SUFFIX)) {
+            // Entries only one side has are reported themselves; compare the order of the rest.
+            if (b === undefined || t === undefined)
+                continue;
+            const baselineIds = b.split('\n');
+            const targetIds = t.split('\n');
+            const shared = (ids, other) => ids.filter((id) => other.includes(id)).join(', ');
+            const baselineOrder = shared(baselineIds, targetIds);
+            const targetOrder = shared(targetIds, baselineIds);
+            if (baselineOrder !== targetOrder)
+                changes.push({ path: key, baselineValue: baselineOrder, targetValue: targetOrder });
+            continue;
+        }
         if (b !== t) {
             changes.push({
                 path: key,
@@ -99253,6 +99288,7 @@ function writeJsonReport(report, outputDir) {
 ;// CONCATENATED MODULE: ./src/report/describe.ts
 
 const LABELS = {
+    '@order': 'Order',
     applicationVisibilities: 'App visibility',
     classAccesses: 'Apex class access',
     customMetadataTypeAccesses: 'Custom metadata type access',
@@ -150949,19 +150985,29 @@ async function run() {
                 info('Job Summary truncated; the artifact has the full report.');
         }
         if (inputs.uploadArtifact) {
-            const result = await publishReportArtifact({
-                name: inputs.artifactName,
-                files: [mdPath, jsonPath, htmlPath],
-                rootDirectory: outputDir,
-                retentionDays: inputs.artifactRetentionDays,
-            });
-            if (result.uploaded) {
-                info(`Published artifact "${inputs.artifactName}".`);
-                if (result.id !== undefined)
-                    setOutput('artifact-id', String(result.id));
+            // The comparison is already reported, so a failed upload fails the step without replacing its result.
+            try {
+                const result = await publishReportArtifact({
+                    name: inputs.artifactName,
+                    files: [mdPath, jsonPath, htmlPath],
+                    rootDirectory: outputDir,
+                    retentionDays: inputs.artifactRetentionDays,
+                });
+                if (result.uploaded) {
+                    info(`Published artifact "${inputs.artifactName}".`);
+                    if (result.id !== undefined)
+                        setOutput('artifact-id', String(result.id));
+                }
+                else {
+                    core_warning(`Artifact upload skipped: ${result.reason}.`);
+                }
             }
-            else {
-                core_warning(`Artifact upload skipped: ${result.reason}.`);
+            catch (error) {
+                const reason = redactAuthUrls(error instanceof Error ? error.message : String(error), authSecrets);
+                setFailed(`The comparison finished (${report.outcome}) but the report artifact "${inputs.artifactName}" could not be ` +
+                    `uploaded (${reason}). The report files are in ${outputDir}` +
+                    `${inputs.jobSummary ? ' and the Job Summary' : ''}. An artifact name can be used once per workflow run, ` +
+                    'so set artifact-name per job when comparing several orgs.');
             }
         }
         if (report.outcome === 'incomplete') {
