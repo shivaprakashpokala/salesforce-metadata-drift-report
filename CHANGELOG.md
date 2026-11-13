@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Entries of a list inside a component, such as picklist values and Flow elements, are matched by their name instead of their position. One added or removed entry is reported as that entry instead of shifting every entry after it. A change of order alone is reported once, as "Order". Lists whose entries have no name, such as layout sections, are still compared by position.
+
+### Fixed
+
+- A failed artifact upload no longer replaces the result of the comparison. The step still fails, but `comparison-status` and the counts keep their values, and the Job Summary keeps the report instead of adding "No report was produced".
+
 ## [1.1.0] - 2026-10-30
 
 ### Changed
